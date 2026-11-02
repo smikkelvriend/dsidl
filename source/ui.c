@@ -448,6 +448,18 @@ static void draw_icon(surface_t *s, int kind, int x, int y, int sz, color_t c)
         icon_gear(s, x, y, sz, c, icon_bg);
         return;
     }
+    if (kind == 10)
+    {
+        // cloud with an arrow
+        gfx_circle(s, x + sz * 3 / 8, y + sz / 2, sz / 4, c);
+        gfx_circle(s, x + sz * 5 / 8, y + sz * 2 / 5, sz * 3 / 10, c);
+        gfx_rrect(s, x + sz / 8, y + sz / 2, sz * 3 / 4, sz / 4 + 1, sz / 8, c);
+        int cx = x + sz / 2;
+        gfx_fill(s, cx - 1, y + sz / 3, 2, sz / 3, icon_bg);
+        for (int i = 0; i < 3; i++)
+            gfx_fill(s, cx - 3 + i, y + sz / 2 + i + 1, 7 - 2 * i, 1, icon_bg);
+        return;
+    }
 
     switch (kind)
     {

@@ -84,6 +84,7 @@ input[type=file]{display:none}
   <button class="btn grow" id="mkdir">+ Map</button>
   <button class="btn" id="hidden" title="Verborgen tonen">&#128065;</button>
   <button class="btn" id="photos">Foto's</button>
+  <button class="btn" id="gdrive" title="Google Drive koppelen">Drive</button>
   <button class="btn primary grow" id="upbtn">&#8593; Uploaden</button>
   <input type="file" id="files" multiple>
   <input type="file" id="folder" webkitdirectory directory multiple>
@@ -223,6 +224,9 @@ $('photos').onclick=async()=>{$('main').style.display='none';document.querySelec
 $('gal-back').onclick=()=>{$('gal').style.display='none';$('main').style.display='block';document.querySelector('.bar').style.display='flex'};
 $('gal-zip').onclick=()=>{location.href='/zip?path='+encodeURIComponent('/DCIM')};
 $('v-close').onclick=()=>{$('viewer').style.display='none';$('v-img').src=''};
+$('gdrive').onclick=async()=>{let cur='';try{cur=await api('/api/drive')}catch(e){}
+  const l=prompt('Plak de link van je Google Drive-map met je eigen gedumpte spellen.\n\nZet de map in Drive op "Iedereen met de link" (bekijken). Daarna vind je hem op de DSi onder Menu > Drive.',cur);
+  if(l===null)return;try{await api('/api/drive?link='+encodeURIComponent(l.trim()),{method:'POST'});toast(l.trim()?'Drive gekoppeld':'Drive ontkoppeld')}catch(x){toast(x.message)}};
 space();
 load(cwd);
 </script>

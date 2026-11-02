@@ -960,6 +960,36 @@ static void api_zip(int fd, server_state_t *st, const char *query)
         snprintf(st->last_msg, sizeof(st->last_msg), "Zip verstuurd: %.60s", base);
 }
 
+static void api_drive(int fd, const char *method, const char *query)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "%s/_dsidl/drive.txt", drive);
+    if (strcmp(method, "POST") == 0)
+    {
+        char link[400] = "";
+        query_param(query, "link", link, sizeof(link));
+        FILE *f = fopen(path, "w");
+        if (!f)
+        {
+            reply_text(fd, 500, "Opslaan mislukt");
+            return;
+        }
+        fprintf(f, "%s\n", link);
+        fclose(f);
+        reply_text(fd, 200, "OK");
+        return;
+    }
+    char link[400] = "";
+    FILE *f = fopen(path, "r");
+    if (f)
+    {
+        if (fgets(link, sizeof(link), f))
+            link[strcspn(link, "\r\n")] = '\0';
+        fclose(f);
+    }
+    reply_text(fd, 200, link);
+}
+
 static void api_action(int fd, server_state_t *st, const char *target, const char *query)
 {
     char full[300], clean[256];
@@ -1121,6 +1151,10 @@ static void handle_client(int fd, server_state_t *st, const char *default_dir)
     else if (strcmp(method, "GET") == 0 && strcmp(target, "/api/photos") == 0)
     {
         api_photos(fd);
+    }
+    else if (strcmp(target, "/api/drive") == 0)
+    {
+        api_drive(fd, method, query ? query : "");
     }
     else if (strcmp(method, "POST") == 0 && strncmp(target, "/api/", 5) == 0)
     {

@@ -28,6 +28,7 @@
 #include "sound.h"
 #include "ndsscan.h"
 #include "fileops.h"
+#include "gdrive.h"
 
 #define CATALOG_URL   "https://db.universal-team.net/data/full.json"
 #define UPDATE_BASE   "https://github.com/smikkelvriend/dsidl/releases/latest/download/"
@@ -61,7 +62,7 @@ static char WIFI_FILE[64];
 
 typedef enum { JOB_NONE, JOB_CATALOG, JOB_DOWNLOAD, JOB_UPDATE_CHECK,
                JOB_UPDATE_INSTALL, JOB_SERVER, JOB_TWL_CHECK, JOB_TWL_DOWNLOAD,
-               JOB_TWL_EXTRACT, JOB_COPY, JOB_BOXART, JOB_SCAN } job_t;
+               JOB_TWL_EXTRACT, JOB_COPY, JOB_BOXART, JOB_SCAN, JOB_DRIVE_LIST, JOB_UNZIP } job_t;
 
 static volatile bool job_running = false;
 static volatile int job_result;
@@ -77,6 +78,8 @@ static char twl_zip[96];
 static int twl_files;
 static ndslist_t installed;          // programs found on the SD card
 static int box_found, box_ok, box_skip;
+static char *drive_html;
+static int unzip_files;
 
 
 // ---------------------------------------------------------------------------
@@ -452,6 +455,15 @@ static int job_main(void *arg)
             r = fo_copy(job_path, job_url, &prog) ? 200 : -1;
             if (r != 200)
                 snprintf(job_err, sizeof(job_err), prog.cancel ? "Gestopt" : "Kopiëren mislukt (SD vol?)");
+            break;
+        case JOB_DRIVE_LIST:
+            free(drive_html);
+            drive_html = NULL;
+            r = http_get_mem(job_url, &drive_html, NULL, 4 * 1024 * 1024, &prog, job_err, sizeof(job_err));
+            break;
+        case JOB_UNZIP:
+            // job_path = zip, job_url = destination folder
+            r = unzip_all(job_path, job_url, &prog, &unzip_files, job_err, sizeof(job_err)) ? 200 : -1;
             break;
         case JOB_SCAN:
             nds_free(&installed);
@@ -2027,6 +2039,306 @@ static void boxart_screen(void)
 }
 
 // ---------------------------------------------------------------------------
+// Mijn Drive: the user's own Google Drive folder (shared with link)
+
+static bool read_drive_link(char *out, size_t len)
+{
+    char path[96];
+    snprintf(path, sizeof(path), "%s/drive.txt", DATA_DIR);
+    out[0] = '\0';
+    FILE *f = fopen(path, "r");
+    if (f)
+    {
+        if (fgets(out, len, f))
+            out[strcspn(out, "\r\n")] = '\0';
+        fclose(f);
+    }
+    return out[0] != '\0';
+}
+
+static void write_drive_link(const char *link)
+{
+    char path[96];
+    snprintf(path, sizeof(path), "%s/drive.txt", DATA_DIR);
+    FILE *f = fopen(path, "w");
+    if (f)
+    {
+        fprintf(f, "%s\n", link);
+        fclose(f);
+    }
+}
+
+static bool ends_with(const char *s, const char *suf)
+{
+    size_t a = strlen(s), b = strlen(suf);
+    return a >= b && strcasecmp(s + a - b, suf) == 0;
+}
+
+static void drive_top(int sel)
+{
+    (void)sel;
+    bool c;
+    int bars;
+    const char *ssid;
+    app_wifi_info(&c, &bars, &ssid);
+    unsigned long long fr = 0;
+    char l1[64] = "", l2[200];
+    if (disk_space(drive, &fr, NULL))
+    {
+        char a[24];
+        format_size64(fr, a, sizeof(a));
+        snprintf(l1, sizeof(l1), "!%s vrij op je SD-kaart", a);
+    }
+    snprintf(l2, sizeof(l2), "Downloads gaan naar %s%s", save_dir, is_drive_root(save_dir) ? "/" : "");
+    const char *lines[] = { l1, "", "Je eigen bestanden uit je Google Drive-map.", ".zip-bestanden worden automatisch uitgepakt en daarna verwijderd.", "", l2 };
+    ui_info_top("Mijn Drive", lines, 6, c, bars, ssid);
+}
+
+// Downloads one Drive file to the save folder (unzipping .zip files)
+static void drive_download(const gd_entry_t *e)
+{
+    while (1)
+    {
+        char text[400];
+        bool zip = ends_with(e->name, ".zip");
+        snprintf(text, sizeof(text), "%s\nOpslaan in: %s%s%s", e->name, save_dir, is_drive_root(save_dir) ? "/" : "",
+                 zip ? "\nWordt na het downloaden uitgepakt." :
+                 (ends_with(e->name, ".7z") || ends_with(e->name, ".rar")) ? "\n.7z/.rar kan de DSi niet uitpakken; gebruik .zip." : "");
+        static const char *labels[] = { "Terug", "Andere map", "Download" };
+        static const char *keys[] = { "B", "Y", "A" };
+        int ch = app_dialog("Downloaden", text, labels, keys, 3, 2);
+        if (ch == 1)
+        {
+            if (folder_picker(save_dir, sizeof(save_dir)))
+                write_settings();
+            gfx_transition(TR_RIGHT);
+            continue;
+        }
+        if (ch != 2)
+            return;
+        break;
+    }
+
+    char name[160];
+    snprintf(name, sizeof(name), "%s", e->name);
+    sanitize_filename(name);
+    const char *dest = is_drive_root(save_dir) ? drive : save_dir;
+    mkdir_p(save_dir);
+    snprintf(job_path, sizeof(job_path), "%s/%s", dest, name);
+    gd_file_url(e->id, job_url, sizeof(job_url));
+
+    int r = run_job_ui(JOB_DOWNLOAD, "Downloaden uit Drive", name);
+    if (r == 200)
+    {
+        // A sharing problem gives an HTML page instead of the file
+        FILE *f = fopen(job_path, "rb");
+        char head[16] = { 0 };
+        if (f)
+        {
+            if (fread(head, 1, 15, f)) {}
+            fclose(f);
+        }
+        if (!strncasecmp(head, "<!DOCTYPE", 9) || !strncasecmp(head, "<html", 5))
+        {
+            remove(job_path);
+            sound_play(SND_ERROR);
+            app_message("Geen toegang", "Google gaf geen bestand terug. Zet de map (of het bestand) in Drive op 'Iedereen met de link' en probeer het opnieuw.");
+            return;
+        }
+    }
+    if (r != 200)
+    {
+        sound_play(SND_ERROR);
+        app_message("Download mislukt", job_err);
+        return;
+    }
+
+    char msg[400];
+    if (ends_with(name, ".zip"))
+    {
+        char zip[300];
+        snprintf(zip, sizeof(zip), "%s", job_path);
+        snprintf(job_url, sizeof(job_url), "%s", dest);
+        r = run_job_ui(JOB_UNZIP, "Uitpakken", name);
+        if (r == 200)
+        {
+            remove(zip); // zip no longer needed
+            snprintf(msg, sizeof(msg), "%s is uitgepakt (%d bestanden) in %s%s. Het zip-bestand is verwijderd.",
+                     name, unzip_files, save_dir, is_drive_root(save_dir) ? "/" : "");
+        }
+        else
+        {
+            sound_play(SND_ERROR);
+            snprintf(msg, sizeof(msg), "%s\n\nHet zip-bestand staat nog in %s.", job_err, save_dir);
+            app_message("Uitpakken mislukt", msg);
+            return;
+        }
+    }
+    else
+        snprintf(msg, sizeof(msg), "Opgeslagen als %s", job_path);
+    nds_free(&installed);
+    nds_scan(&installed, drive, 1000);
+    build_rows();
+    sound_play(SND_SUCCESS);
+    app_message("Klaar!", msg);
+}
+
+static void drive_screen(void)
+{
+    char link[400];
+    if (!read_drive_link(link, sizeof(link)))
+    {
+        static const char *labels[] = { "Terug", "Link typen", "Via telefoon" };
+        static const char *keys[] = { "B", "Y", "A" };
+        int ch = app_dialog("Mijn Drive",
+            "Nog geen Drive-map gekoppeld. Zet je eigen gedumpte spellen in een Google Drive-map, deel die met 'Iedereen met de link' en plak de link op je telefoon (Telefoon > Drive).",
+            labels, keys, 3, 2);
+        if (ch == 2)
+        {
+            run_server();
+            gfx_transition(TR_RIGHT);
+        }
+        else if (ch == 1)
+        {
+            char buf[200] = "";
+            if (app_text_input("Map-ID of link van Google Drive", "het deel na /folders/", buf, sizeof(buf), false))
+                write_drive_link(buf);
+        }
+        if (!read_drive_link(link, sizeof(link)))
+            return;
+    }
+    if (!ensure_wifi())
+        return;
+
+    char root_id[72], rkey[64];
+    if (!gd_parse_link(link, root_id, sizeof(root_id), rkey, sizeof(rkey)))
+    {
+        app_message("Ongeldige link", "De opgeslagen Drive-link wordt niet herkend. Plak hem opnieuw via Telefoon > Drive.");
+        return;
+    }
+
+    // Folder stack
+    char ids[16][72], names[16][80];
+    int depth = 0;
+    snprintf(ids[0], sizeof(ids[0]), "%s", root_id);
+    snprintf(names[0], sizeof(names[0]), "Mijn Drive");
+    char filter[32] = "";
+    int sel = 0;
+
+    while (1)
+    {
+        gd_folder_url(ids[depth], depth == 0 ? rkey : "", job_url, sizeof(job_url));
+        int r = run_job_ui(JOB_DRIVE_LIST, "Drive openen", names[depth]);
+        gd_entry_t *ents = NULL;
+        int n = (r == 200 && drive_html) ? gd_parse_listing(drive_html, &ents) : -1;
+        free(drive_html);
+        drive_html = NULL;
+        if (n < 0)
+        {
+            app_message("Drive", r == 404 || r == 403 ? "Map niet gevonden of niet gedeeld. Zet hem op 'Iedereen met de link'." : job_err);
+            if (depth == 0)
+                break;
+            depth--;
+            continue;
+        }
+
+        bool back = false;
+        while (1)
+        {
+            // Filtered view
+            int *map = calloc(n + 1, sizeof(int));
+            ui_row_t *rw = calloc(n + 2, sizeof(ui_row_t));
+            int m = 0;
+            if (depth > 0)
+                rw[m++] = (ui_row_t){ ".. (terug)", NULL, NULL, NULL, NULL, 1 };
+            for (int i = 0; i < n && map && rw; i++)
+            {
+                if (filter[0] && !contains_ci(ents[i].name, filter))
+                    continue;
+                map[m - (depth > 0 ? 1 : 0)] = i;
+                const char *dot = strrchr(ents[i].name, '.');
+                const char *cat = (dot && (!strcasecmp(dot, ".nds") || !strcasecmp(dot, ".dsi"))) ? "game" :
+                                  (dot && !strcasecmp(dot, ".zip")) ? "app" : "other";
+                rw[m++] = (ui_row_t){ ents[i].name, ents[i].folder ? "Map" : (dot && !strcasecmp(dot, ".zip") ? "Zip - wordt uitgepakt" : "Bestand"),
+                                      cat, NULL, NULL, ents[i].folder ? 1 : 0 };
+            }
+            char sub[120];
+            if (filter[0])
+                snprintf(sub, sizeof(sub), "Zoeken: %s (%d)", filter, m - (depth > 0 ? 1 : 0));
+            else
+                snprintf(sub, sizeof(sub), "%s - %d items", names[depth], n);
+            static const char *labels[] = { "Openen", "Zoeken", "Terug" };
+            static const char *keys[] = { "A", "Y", "B" };
+            if (sel >= m)
+                sel = 0;
+            int res = run_list("Mijn Drive", sub, rw, m, &sel, 3, labels, keys, 3,
+                               filter[0] ? "Niets gevonden" : "Lege map", drive_top);
+            free(rw);
+
+            if (res == -11)
+            {
+                app_text_input("Zoeken in Drive", "naam van het spel", filter, sizeof(filter), false);
+                sel = 0;
+                free(map);
+                continue;
+            }
+            if (res == -1 || res == -12)
+            {
+                free(map);
+                if (filter[0])
+                {
+                    filter[0] = '\0';
+                    sel = 0;
+                    continue;
+                }
+                back = true;
+                break;
+            }
+            if (res == -10)
+                res = sel;
+            if (res < 0)
+            {
+                free(map);
+                continue;
+            }
+            if (depth > 0 && res == 0)
+            {
+                free(map);
+                back = true;
+                break;
+            }
+            gd_entry_t *e = &ents[map[res - (depth > 0 ? 1 : 0)]];
+            free(map);
+            if (e->folder)
+            {
+                if (depth < 15)
+                {
+                    depth++;
+                    snprintf(ids[depth], sizeof(ids[depth]), "%s", e->id);
+                    snprintf(names[depth], sizeof(names[depth]), "%.78s", e->name);
+                    filter[0] = '\0';
+                    sel = 0;
+                    gfx_transition(TR_LEFT);
+                }
+                break;
+            }
+            drive_download(e);
+        }
+        free(ents);
+        if (back)
+        {
+            if (depth == 0)
+                break;
+            depth--;
+            sel = 0;
+            filter[0] = '\0';
+            gfx_transition(TR_RIGHT);
+        }
+    }
+    gfx_transition(TR_RIGHT);
+}
+
+// ---------------------------------------------------------------------------
 // TWiLight Menu++ updater
 
 static void twl_installed_version(char *out, size_t len)
@@ -2120,10 +2432,11 @@ static void menu(void)
         { "Bestanden", 8, RGB(120, 132, 150) },
         { "Instellen", 9, RGB(90, 100, 118) },
         { "Updaten", 3, RGB(140, 100, 242) },
+        { "Drive", 10, RGB(30, 160, 90) },
     };
     static const char *titles[] = {
         "Mijn software", "Telefoon", "Wifi-netwerken", "Lijst vernieuwen", "TWiLight Menu++ bijwerken",
-        "Boxart downloaden", "Bestanden", "Instellingen", "DSiDL updaten"
+        "Boxart downloaden", "Bestanden", "Instellingen", "DSiDL updaten", "Mijn Drive"
     };
     static const char *texts[] = {
         "Alle games en apps op je SD-kaart, met hun eigen icoontje. Verplaatsen, kopi\xc3\xabren, hernoemen of verwijderen.",
@@ -2135,8 +2448,9 @@ static void menu(void)
         "Blader door je SD-kaart: verplaatsen, kopi\xc3\xabren, hernoemen, verbergen en verwijderen.",
         "Donker of licht thema, accentkleur, geluid en de standaardmap.",
         "Kijk op GitHub of er een nieuwe versie van DSiDL is en installeer hem.",
+        "Je eigen bestanden uit je Google Drive-map: zoeken, downloaden en zip automatisch uitpakken.",
     };
-    const int n = 9;
+    const int n = 10;
     int cur = 0;
     int anim = 0;
     int rx, ry;
@@ -2207,6 +2521,7 @@ static void menu(void)
             case 6: files_screen(); break;
             case 7: settings_screen(); break;
             case 8: self_update(); break;
+            case 9: drive_screen(); break;
             default:
                 gfx_transition(TR_RIGHT);
                 return;
