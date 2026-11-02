@@ -1,0 +1,75 @@
+name: TWiLight Menu++ voor DSiDL
+
+# TWiLight Menu++ is released as a .7z with a 16 MB dictionary, which a DSi
+# (16 MB RAM) can't unpack. This job repacks the official DSi build as a
+# normal zip (32 KB deflate window) so DSiDL can install it on the console.
+# Only BOOT.NDS and _nds/ are included (no settings are overwritten).
+#
+# TWiLight Menu++ is GPL-3.0: https://github.com/DS-Homebrew/TWiLightMenu
+
+on:
+  schedule:
+    - cron: "17 5 * * *"   # daily
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".github/workflows/twilight.yml"]
+
+permissions:
+  contents: write
+
+jobs:
+  repack:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Find latest TWiLight Menu++
+        id: twl
+        run: |
+          TAG=$(gh api repos/DS-Homebrew/TWiLightMenu/releases/latest --jq .tag_name)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          HAVE=$(gh release view twilight -R "$GITHUB_REPOSITORY" --json body --jq .body 2>/dev/null | sed -n 's/^Versie: //p' | head -n1 || true)
+          echo "Latest: $TAG, repacked: ${HAVE:-none}"
+          if [ "$TAG" = "$HAVE" ] && [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download and repack
+        if: steps.twl.outputs.skip != '1'
+        run: |
+          TAG=${{ steps.twl.outputs.tag }}
+          curl -sSL -o twl.7z "https://github.com/DS-Homebrew/TWiLightMenu/releases/download/$TAG/TWiLightMenu-DSi.7z"
+          mkdir x && 7z x -y -ox twl.7z > /dev/null
+          cd x
+          python3 - <<'EOF'
+          import os, zipfile
+          with zipfile.ZipFile("../twilight-dsi.zip", "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+              z.write("BOOT.NDS", "BOOT.NDS")
+              for root, dirs, files in os.walk("_nds"):
+                  dirs.sort()
+                  z.writestr(root.replace(os.sep, "/") + "/", "")  # keep empty folders
+                  for f in sorted(files):
+                      p = os.path.join(root, f)
+                      z.write(p, p.replace(os.sep, "/"))
+          EOF
+          cd ..
+          echo "$TAG" > twilight-version.txt
+          ls -la twilight-dsi.zip
+
+      - name: Publish
+        if: steps.twl.outputs.skip != '1'
+        run: |
+          TAG=${{ steps.twl.outputs.tag }}
+          NOTES="TWiLight Menu++ (DSi) opnieuw verpakt als zip zodat DSiDL het op de DSi kan installeren.
+          Bevat alleen BOOT.NDS en _nds/ uit TWiLightMenu-DSi.7z; je instellingen blijven staan.
+
+          Versie: $TAG
+          Bron en licentie (GPL-3.0): https://github.com/DS-Homebrew/TWiLightMenu/releases/tag/$TAG"
+          if gh release view twilight -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release edit twilight -R "$GITHUB_REPOSITORY" --notes "$NOTES" --prerelease --latest=false
+            gh release upload twilight -R "$GITHUB_REPOSITORY" twilight-dsi.zip twilight-version.txt --clobber
+          else
+            gh release create twilight -R "$GITHUB_REPOSITORY" --title "TWiLight Menu++ voor DSiDL" \
+              --notes "$NOTES" --prerelease --latest=false twilight-dsi.zip twilight-version.txt
+          fi

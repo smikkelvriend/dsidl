@@ -346,7 +346,7 @@ static void conn_cb(const char *t)
     app_status("Verbinden...", conn_status);
 }
 
-static void draw_manager(int sel, int scroll)
+static void draw_manager(int sel, int scroll_px, int cursor_px)
 {
     static ui_row_t rows[MAX_APS];
     static char subs[MAX_APS][48];
@@ -398,7 +398,7 @@ static void draw_manager(int sel, int scroll)
     static const char *labels[] = { "Verbinden", "Wachtwoord", "Zoeken", "Terug" };
     static const char *keys[] = { "A", "Y", "R", "B" };
     ui_list_screen("Netwerken in de buurt", isDSiMode() ? "DSi-modus - WPA2 ondersteund" : "DS-modus - alleen WEP/open",
-                   rows, num_aps, sel, scroll, 2, labels, keys, 4, "Zoeken naar netwerken...");
+                   rows, num_aps, sel, scroll_px, cursor_px, 2, labels, keys, 4, "Zoeken naar netwerken...");
     gfx_present();
 }
 
@@ -470,8 +470,10 @@ bool wifi_manager(void)
     scan_for(120);
 
     int sel = 0, scroll = 0, drag = 0;
+    int a_s = 0, a_c = 0;
     int frame = 0;
     bool dirty = true;
+    gfx_transition(TR_LEFT);
 
     while (1)
     {
@@ -483,8 +485,11 @@ bool wifi_manager(void)
                 scroll = sel;
             if (sel >= scroll + LIST_ROWS)
                 scroll = sel - LIST_ROWS + 1;
-            draw_manager(sel, scroll);
-            dirty = false;
+            int ns = app_ease(a_s, scroll * LIST_STEP), nc = app_ease(a_c, sel * LIST_STEP);
+            a_s = ns;
+            a_c = nc;
+            draw_manager(sel, a_s, a_c);
+            dirty = a_s != scroll * LIST_STEP || a_c != sel * LIST_STEP;
         }
 
         app_wait_frame();

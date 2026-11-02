@@ -1,6 +1,6 @@
 # DSiDL
 
-Een grafische app met aanraakscherm: lijst met kaarten, zoeken met een eigen schermtoetsenbord, tabbladen per soort, voortgang met snelheid en resterende tijd, en een QR-code om je telefoon te verbinden.
+Een grafische app met aanraakscherm en vloeiende animaties (schuivende schermen, soepel scrollen, dialogen die openpoppen): lijst met kaarten, zoeken met een eigen schermtoetsenbord, tabbladen per soort, voortgang met snelheid en resterende tijd, en een QR-code om je telefoon te verbinden.
 
 Homebrew-downloader voor de (gemodde) Nintendo DSi. Alles werkt op de DSi zelf via wifi:
 
@@ -8,6 +8,7 @@ Homebrew-downloader voor de (gemodde) Nintendo DSi. Alles werkt op de DSi zelf v
 - **Downloaden naar een map naar keuze**: standaard `sd:/roms/nds/`; druk bij het downloaden op **Y** om door je SD-kaart te bladeren en een andere map te kiezen (of een nieuwe te maken). DSiDL onthoudt de laatst gekozen map.
 - **Bestanden beheren vanaf je telefoon**: de DSi wordt een mini-webserver. Open het getoonde adres (bv. `http://192.168.1.23`) in de browser van je telefoon: blader door de hele SD-kaart, upload naar elke map, download naar je telefoon, maak mappen, hernoem, verwijder, en verberg of toon bestanden/mappen (bv. een map die je in TWiLight Menu++ verborgen hebt).
 - **Wifi-beheer**: zoek netwerken, kies er een en typ het wachtwoord met het schermtoetsenbord. Netwerken worden bewaard in `sd:/_dsidl/wifi.txt` (niet in het interne geheugen van de DSi) en DSiDL verbindt daarna automatisch met het sterkste bekende netwerk. De netwerken uit de DSi-instellingen werken ook gewoon.
+- **TWiLight Menu++ bijwerken**: via het menu (maantje) installeert DSiDL de nieuwste TWiLight Menu++ op de DSi zelf. Omdat het officiële .7z-archief te groot is om op een DSi uit te pakken, pakt een GitHub Action (`.github/workflows/twilight.yml`) het dagelijks om naar een DSi-vriendelijke zip (alleen `BOOT.NDS` en `_nds/`, je instellingen blijven staan). DSiDL downloadt die, pakt hem uit en verwijdert de zip daarna. Herstart je DSi na afloop.
 - **Zichzelf updaten**: via het menu haalt DSiDL de nieuwste versie van GitHub en vervangt zijn eigen `.nds`-bestand.
 
 ## Installeren
@@ -84,6 +85,6 @@ make APP_VERSION=1.0.1
 - Titels die alleen als `.zip`/`.7z` worden aangeboden (bv. TWiLight Menu++, nds-bootstrap) staan niet in de lijst; uitpakken op de DSi zit er (nog) niet in.
 - De DSi heeft geen klok met zekere tijd, dus de geldigheidsdatum van certificaten wordt niet gecontroleerd (de handtekening en de servernaam wel).
 
-Licenties: Mbed TLS (Apache-2.0), rootcertificaten van Mozilla (MPL-2.0), BlocksDS/libnds (zlib), lettertype Poppins (SIL Open Font License), QR Code generator van Project Nayuki (MIT).
+Licenties: Mbed TLS (Apache-2.0), rootcertificaten van Mozilla (MPL-2.0), BlocksDS/libnds (zlib), lettertype Poppins (SIL Open Font License), QR Code generator van Project Nayuki (MIT), miniz/tinfl voor het uitpakken (MIT). TWiLight Menu++ is van DS-Homebrew (GPL-3.0).
 
 Ontwerp bekijken zonder DSi: `cc -Isource tools/preview/host.c source/gfx.c source/ui.c source/font_data.c source/qrcodegen.c -o preview && ./preview` maakt van elk scherm een afbeelding.

@@ -23,9 +23,12 @@
 #include "gfx.h"
 #include "ui.h"
 #include "appui.h"
+#include "unzip.h"
 
 #define CATALOG_URL   "https://db.universal-team.net/data/full.json"
 #define UPDATE_BASE   "https://github.com/smikkelvriend/dsidl/releases/latest/download/"
+// TWiLight Menu++ repacked as a DSi-friendly zip by .github/workflows/twilight.yml
+#define TWL_BASE      "https://github.com/smikkelvriend/dsidl/releases/download/twilight/"
 // "sd:" on the DSi internal SD card, "fat:" on a flashcard
 char drive[8] = "sd:";
 static char DATA_DIR[32], CATALOG_FILE[64], SETTINGS_FILE[64];
@@ -51,7 +54,8 @@ static char WIFI_FILE[64];
 // Background jobs (run in a cothread with a big stack, UI keeps running)
 
 typedef enum { JOB_NONE, JOB_CATALOG, JOB_DOWNLOAD, JOB_UPDATE_CHECK,
-               JOB_UPDATE_INSTALL, JOB_SERVER } job_t;
+               JOB_UPDATE_INSTALL, JOB_SERVER, JOB_TWL_CHECK, JOB_TWL_DOWNLOAD,
+               JOB_TWL_EXTRACT } job_t;
 
 static volatile bool job_running = false;
 static volatile int job_result;
@@ -63,6 +67,8 @@ static char job_msg[512];
 static char job_url[2048];
 static char job_path[300];
 static char remote_version[32];
+static char twl_zip[96];
+static int twl_files;
 
 
 // ---------------------------------------------------------------------------
@@ -297,6 +303,29 @@ static int job_main(void *arg)
             }
             break;
         }
+        case JOB_TWL_CHECK:
+        {
+            char *data = NULL;
+            r = http_get_mem(TWL_BASE "twilight-version.txt", &data, NULL, 256, &prog, job_err, sizeof(job_err));
+            if (r == 200 && data)
+            {
+                char *p = data;
+                while (*p == ' ' || *p == '\n' || *p == '\r')
+                    p++;
+                p[strcspn(p, " \r\n")] = '\0';
+                snprintf(remote_version, sizeof(remote_version), "%s", p);
+            }
+            else if (r == 404)
+                snprintf(job_err, sizeof(job_err), "TWiLight is nog niet klaargezet op GitHub");
+            free(data);
+            break;
+        }
+        case JOB_TWL_DOWNLOAD:
+            r = http_get_file(TWL_BASE "twilight-dsi.zip", twl_zip, &prog, job_err, sizeof(job_err));
+            break;
+        case JOB_TWL_EXTRACT:
+            r = unzip_all(twl_zip, drive, &prog, &twl_files, job_err, sizeof(job_err)) ? 200 : -1;
+            break;
         case JOB_SERVER:
         {
             r = server_run(&srv, save_dir) ? 200 : -1;
@@ -402,7 +431,12 @@ static void build_rows(void)
     }
 }
 
-static void draw_browser(void)
+// Animation state of the browser
+static int a_scroll, a_cursor, a_tab, a_slide;
+static int top_sel = -1, top_dl = -1, top_count = -1;
+#define TAB_W ((SCR_W - 12) / NUM_CATS)
+
+static void draw_browser_top(void)
 {
     bool c;
     int bars;
@@ -422,7 +456,22 @@ static void draw_browser(void)
     {
         ui_browser_top(NULL, c, bars, ssid);
     }
+    // New item slides in from the right inside the card
+    if (a_slide)
+        gfx_shift_x(&scr_top, 10, 28, 236, 130, a_slide, C_CARD);
+}
 
+static void draw_browser_bottom(void)
+{
+    const char *empty = cat.count == 0 ? "Nog geen lijst - X > Lijst" : "Niets gevonden";
+    ui_browser_bottom(rows, view_count, sel, a_scroll, a_cursor, search, tab_labels, NUM_CATS,
+                      category, a_tab, empty);
+}
+
+// Draws the browser, advancing animations one step. Returns true while
+// something is still moving (call again next frame).
+static bool draw_browser_step(bool force)
+{
     if (sel < scroll)
         scroll = sel;
     if (sel >= scroll + BROWSER_ROWS)
@@ -430,8 +479,46 @@ static void draw_browser(void)
     if (scroll < 0)
         scroll = 0;
 
-    const char *empty = cat.count == 0 ? "Nog geen lijst - X > Lijst" : "Niets gevonden";
-    ui_browser_bottom(rows, view_count, sel, scroll, search, tab_labels, NUM_CATS, category, empty);
+    // Selection change -> top card slides
+    bool top_changed = force || sel != top_sel || dl_choice != top_dl || view_count != top_count;
+    if (sel != top_sel && top_sel >= 0 && !force)
+        a_slide = 28;
+    top_sel = sel;
+    top_dl = dl_choice;
+    top_count = view_count;
+
+    int ns = app_ease(a_scroll, scroll * BROWSER_STEP);
+    int nc = app_ease(a_cursor, sel * BROWSER_STEP);
+    int nt = app_ease(a_tab, category * TAB_W);
+    int nsl = app_ease(a_slide, 0);
+    bool bottom_moving = ns != a_scroll || nc != a_cursor || nt != a_tab;
+    bool top_moving = nsl != a_slide;
+    a_scroll = ns;
+    a_cursor = nc;
+    a_tab = nt;
+    a_slide = nsl;
+
+    if (force || top_changed || top_moving)
+        draw_browser_top();
+    if (force || bottom_moving || top_changed)
+        draw_browser_bottom();
+
+    if (force || ((top_changed || top_moving) && (bottom_moving || top_changed)))
+        gfx_present();
+    else if (top_changed || top_moving)
+        gfx_present_top();
+    else if (bottom_moving)
+        gfx_present_bot();
+
+    return bottom_moving || top_moving || a_scroll != scroll * BROWSER_STEP ||
+           a_cursor != sel * BROWSER_STEP || a_tab != category * TAB_W || a_slide != 0;
+}
+
+// Full redraw without animation steps (used under dialogs)
+static void draw_browser(void)
+{
+    draw_browser_top();
+    draw_browser_bottom();
     gfx_present();
 }
 
@@ -443,16 +530,25 @@ static int run_job_ui(job_t type, const char *title, const char *name)
 {
     start_job(type);
     rate_reset();
+    gfx_transition(TR_UP_BOT);
     int frame = 0;
+    unsigned long shown = 0;
     while (job_running)
     {
-        if ((frame++ % 6) == 0)
+        // The bar glides towards the real value instead of jumping
+        unsigned long target = prog.done;
+        if (target < shown)
+            shown = target;
+        unsigned long d = target - shown;
+        shown += d > 8 ? d / 5 : d;
+        if ((frame++ % 2) == 0)
         {
-            rate_update(prog.done);
-            ui_progress_screen(title, name, prog.status, prog.done, prog.total, rate.speed,
+            if (frame % 6 == 1)
+                rate_update(prog.done);
+            ui_progress_screen(title, name, prog.status, shown, prog.total, rate.speed,
                                rate_eta(prog.done, prog.total),
                                prog.cancel ? "Bezig..." : "Annuleren");
-            gfx_present();
+            gfx_present_bot();
         }
         app_wait_frame();
         input_t in = app_input();
@@ -528,7 +624,9 @@ static bool folder_picker(char *dir, size_t dirlen)
     char *names[PICK_MAX];
     int n = list_dirs(cur, names, PICK_MAX);
     int sel_i = 0, scr = 0, drag = 0;
+    int a_s = 0, a_c = 0;
     bool dirty = true, chosen = false;
+    gfx_transition(TR_LEFT);
 
     static const char *labels[] = { "Hier opslaan", "Nieuwe map", "Annuleren" };
     static const char *keys[] = { "X", "Y", "B" };
@@ -570,11 +668,15 @@ static bool folder_picker(char *dir, size_t dirlen)
                 "",
                 "DSiDL onthoudt je keuze.",
             };
+            int ns = app_ease(a_s, scr * LIST_STEP), nc = app_ease(a_c, sel_i * LIST_STEP);
+            bool moving = ns != scr * LIST_STEP || nc != sel_i * LIST_STEP;
+            a_s = ns;
+            a_c = nc;
             ui_info_top("Map kiezen", info, 6, c, bars, ssid);
-            ui_list_screen("Map kiezen", shown, r, total, sel_i, scr, 1, labels, keys, 3,
+            ui_list_screen("Map kiezen", shown, r, total, sel_i, a_s, a_c, 1, labels, keys, 3,
                            "Geen submappen");
             gfx_present();
-            dirty = false;
+            dirty = moving;
         }
 
         app_wait_frame();
@@ -670,12 +772,15 @@ static bool folder_picker(char *dir, size_t dirlen)
                 free(names[i]);
             n = list_dirs(cur, names, PICK_MAX);
             sel_i = scr = 0;
+            a_s = a_c = 0;
+            gfx_transition(go_up ? TR_RIGHT : TR_LEFT);
             dirty = true;
         }
     }
 
     for (int i = 0; i < n; i++)
         free(names[i]);
+    gfx_transition(TR_RIGHT);
 
     if (chosen)
         snprintf(dir, dirlen, "%s", is_drive_root(cur) ? drive : cur);
@@ -783,6 +888,7 @@ static void run_server(void)
     snprintf(url, sizeof(url), "http://%s", srv.ip);
 
     ui_server_top(url);
+    gfx_transition(TR_LEFT);
     start_job(JOB_SERVER);
     rate_reset();
     int frame = 0;
@@ -850,42 +956,141 @@ static void do_search(void)
     build_rows();
 }
 
+// ---------------------------------------------------------------------------
+// TWiLight Menu++ updater
+
+static void twl_installed_version(char *out, size_t len)
+{
+    char path[96];
+    snprintf(path, sizeof(path), "%s/twilight_version.txt", DATA_DIR);
+    out[0] = '\0';
+    FILE *f = fopen(path, "r");
+    if (f)
+    {
+        if (fgets(out, len, f))
+            out[strcspn(out, "\r\n")] = '\0';
+        fclose(f);
+    }
+}
+
+static void twilight_update(void)
+{
+    if (strcmp(drive, "sd:") != 0)
+    {
+        app_message("TWiLight Menu++", "Bijwerken kan alleen op de SD-kaart van de DSi zelf, niet op een flashcard.");
+        return;
+    }
+    if (!ensure_wifi())
+        return;
+
+    remote_version[0] = '\0';
+    int r = run_job_ui(JOB_TWL_CHECK, "TWiLight Menu++", "Nieuwste versie opzoeken");
+    gfx_transition(TR_DOWN_BOT);
+    if (r != 200 || !remote_version[0])
+    {
+        draw_browser();
+        app_message("TWiLight Menu++", job_err[0] ? job_err : "Kon de versie niet ophalen.");
+        return;
+    }
+
+    char have[32];
+    twl_installed_version(have, sizeof(have));
+    char text[300];
+    if (have[0] && version_compare(remote_version, have) <= 0)
+        snprintf(text, sizeof(text), "Je hebt al %s, de nieuwste versie. Toch opnieuw installeren?", have);
+    else
+        snprintf(text, sizeof(text), "Versie %s is beschikbaar%s%s%s.\n\nOngeveer 35 MB downloaden en 46 MB uitpakken. Je instellingen blijven staan. Nu installeren?",
+                 remote_version, have[0] ? " (je hebt " : "", have, have[0] ? ")" : "");
+    draw_browser();
+    if (!app_confirm("TWiLight Menu++", text, "Installeren", "Later"))
+        return;
+
+    snprintf(twl_zip, sizeof(twl_zip), "%s/twilight.zip", DATA_DIR);
+    r = run_job_ui(JOB_TWL_DOWNLOAD, "TWiLight downloaden", remote_version);
+    if (r != 200)
+    {
+        remove(twl_zip);
+        draw_browser();
+        app_message("Download mislukt", job_err);
+        return;
+    }
+
+    r = run_job_ui(JOB_TWL_EXTRACT, "TWiLight installeren", "Bestanden uitpakken");
+    remove(twl_zip); // the zip is no longer needed
+    draw_browser();
+    if (r != 200)
+    {
+        snprintf(text, sizeof(text), "%s\n\nTWiLight kan nu half bijgewerkt zijn: probeer het opnieuw voordat je je DSi herstart.", job_err);
+        app_message("Installeren mislukt", text);
+        return;
+    }
+
+    char path[96];
+    snprintf(path, sizeof(path), "%s/twilight_version.txt", DATA_DIR);
+    FILE *f = fopen(path, "w");
+    if (f)
+    {
+        fprintf(f, "%s\n", remote_version);
+        fclose(f);
+    }
+    snprintf(text, sizeof(text), "TWiLight Menu++ %s is geïnstalleerd (%d bestanden). Herstart je DSi om de nieuwe versie te gebruiken.",
+             remote_version, twl_files);
+    app_message("Klaar!", text);
+}
+
 static void menu(void)
 {
     static const ui_tile_t tiles[] = {
         { "Telefoon", 0, RGB(38, 190, 110) },
         { "Wifi", 1, RGB(18, 158, 230) },
         { "Lijst", 2, RGB(255, 140, 48) },
+        { "TWiLight", 6, RGB(72, 84, 190) },
         { "Updaten", 3, RGB(140, 100, 242) },
         { "Over", 4, RGB(120, 132, 150) },
         { "Terug", 5, RGB(238, 72, 82) },
     };
     static const char *titles[] = {
-        "Telefoon", "Wifi-netwerken", "Lijst vernieuwen", "DSiDL updaten", "Over DSiDL", "Terug"
+        "Telefoon", "Wifi-netwerken", "Lijst vernieuwen", "TWiLight Menu++ bijwerken",
+        "DSiDL updaten", "Over DSiDL", "Terug"
     };
     static const char *texts[] = {
         "Bekijk, upload, verplaats en kopieer bestanden op je SD-kaart vanuit de browser op je telefoon.",
         "Zoek netwerken, kies er een en typ het wachtwoord. DSiDL onthoudt ze op je SD-kaart.",
         "Haal de nieuwste lijst met homebrew op uit Universal-DB.",
+        "Installeer de nieuwste versie van TWiLight Menu++ op je SD-kaart. Je instellingen blijven staan.",
         "Kijk op GitHub of er een nieuwe versie van DSiDL is en installeer hem.",
         "Versie, instellingen en waar DSiDL zijn bestanden bewaart.",
         "Terug naar de lijst.",
     };
-    const int n = 6;
+    const int n = 7;
     int cur = 0;
+    int anim = 0;
+    int rx, ry;
+    ui_menu_tile_pos(0, &rx, &ry);
     bool dirty = true;
+    gfx_transition(TR_LEFT);
 
     while (1)
     {
-        if (dirty)
+        int tx, ty;
+        ui_menu_tile_pos(cur, &tx, &ty);
+        int nx = app_ease(rx, tx), ny = app_ease(ry, ty);
+        bool moving = anim < 256 || nx != rx || ny != ry;
+        if (dirty || moving)
         {
+            rx = nx;
+            ry = ny;
             bool c;
             int bars;
             const char *ssid;
             app_wifi_info(&c, &bars, &ssid);
-            ui_menu(tiles, n, cur, titles[cur], texts[cur], c, bars, ssid);
+            ui_menu(tiles, n, cur, titles[cur], texts[cur], c, bars, ssid, anim, rx, ry);
             gfx_present();
             dirty = false;
+            if (anim < 256)
+                anim += 24;
+            if (anim > 256)
+                anim = 256;
         }
         app_wait_frame();
         input_t in = app_input();
@@ -894,10 +1099,13 @@ static void menu(void)
 
         if (k & KEY_RIGHT) { cur = (cur + 1) % n; dirty = true; }
         if (k & KEY_LEFT) { cur = (cur + n - 1) % n; dirty = true; }
-        if (k & KEY_DOWN) { cur = (cur + 3) % n; dirty = true; }
-        if (k & KEY_UP) { cur = (cur + n - 3) % n; dirty = true; }
+        if (k & KEY_DOWN) { cur = cur + 4 < n ? cur + 4 : cur % 4; dirty = true; }
+        if (k & KEY_UP) { cur = cur - 4 >= 0 ? cur - 4 : (cur + 4 < n ? cur + 4 : cur); dirty = true; }
         if (k & (KEY_B | KEY_X))
+        {
+            gfx_transition(TR_RIGHT);
             return;
+        }
         if (k & KEY_A)
             act = cur;
         if (in.hit >= HIT_TILE && in.hit < HIT_TILE + n)
@@ -908,20 +1116,25 @@ static void menu(void)
         if (act < 0)
             continue;
 
+        // Short "press" on the tile before opening it
+        ui_menu_tile_pos(cur, &rx, &ry);
         dirty = true;
         switch (act)
         {
-            case 0: run_server(); break;
-            case 1: wifi_manager(); break;
-            case 2: refresh_catalog(); return;
-            case 3: self_update(); break;
-            case 4:
+            case 0: run_server(); gfx_transition(TR_RIGHT); break;
+            case 1: wifi_manager(); gfx_transition(TR_RIGHT); break;
+            case 2: gfx_transition(TR_RIGHT); refresh_catalog(); return;
+            case 3: twilight_update(); break;
+            case 4: self_update(); break;
+            case 5:
                 snprintf(job_msg, sizeof(job_msg),
                          "DSiDL %s - homebrew uit Universal-DB.\nOpslaan in: %s\nInstellingen: %s\nProgramma: %s",
                          APP_VERSION, save_dir, SETTINGS_FILE, self_path);
                 app_message("Over DSiDL", job_msg);
                 break;
-            default: return;
+            default:
+                gfx_transition(TR_RIGHT);
+                return;
         }
     }
 }
@@ -1036,12 +1249,14 @@ int main(int argc, char **argv)
     bool dirty = true;
     int repeat = 0, drag = 0;
 
+    gfx_transition(TR_FADE);
+    bool force = true;
     while (1)
     {
-        if (dirty)
+        if (dirty || force)
         {
-            draw_browser();
-            dirty = false;
+            dirty = draw_browser_step(force);
+            force = false;
         }
 
         app_wait_frame();
@@ -1112,8 +1327,8 @@ int main(int argc, char **argv)
             dirty = true;
         }
 
-        if ((down & KEY_A) || tap_download) { download_selected(); dirty = true; }
-        if ((down & KEY_Y) || in.hit == HIT_SEARCH) { do_search(); dirty = true; }
+        if ((down & KEY_A) || tap_download) { download_selected(); force = true; }
+        if ((down & KEY_Y) || in.hit == HIT_SEARCH) { do_search(); force = true; }
         if (down & KEY_B)
         {
             if (search[0])
@@ -1131,12 +1346,12 @@ int main(int argc, char **argv)
             build_rows();
             dirty = true;
         }
-        if ((down & KEY_X) || in.hit == HIT_MENU) { menu(); dirty = true; }
+        if ((down & KEY_X) || in.hit == HIT_MENU) { menu(); force = true; }
         if (down & KEY_START)
         {
             if (app_confirm("Afsluiten", "DSiDL afsluiten?", "Afsluiten", "Nee"))
                 break;
-            dirty = true;
+            force = true;
         }
     }
 

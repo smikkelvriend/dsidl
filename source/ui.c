@@ -65,9 +65,16 @@ color_t ui_category_color(const char *c)
     return RGB(136, 149, 167);
 }
 
+static color_t *bg_cache;
+
 void ui_background(surface_t *s)
 {
     gfx_noclip(s);
+    if (bg_cache)
+    {
+        memcpy(s->px, bg_cache, SCR_W * SCR_H * 2);
+        return;
+    }
     gfx_vgrad(s, 0, 0, SCR_W, SCR_H, C_BG1, C_BG2);
     // Soft diagonal stripes
     for (int y = 0; y < SCR_H; y++)
@@ -77,6 +84,9 @@ void ui_background(surface_t *s)
                 color_t *p = &s->px[y * SCR_W + x + k];
                 *p = gfx_mix(*p, C_WHITE, 70);
             }
+    bg_cache = malloc(SCR_W * SCR_H * 2);
+    if (bg_cache)
+        memcpy(bg_cache, s->px, SCR_W * SCR_H * 2);
 }
 
 void ui_card(surface_t *s, int x, int y, int w, int h)
@@ -335,8 +345,24 @@ void icon_up(surface_t *s, int x, int y, int sz, color_t c)
         gfx_fill(s, cx - i, y + sz / 4 + i, i * 2 + 1, 1, c);
 }
 
+void icon_moon(surface_t *s, int x, int y, int sz, color_t c, color_t bg)
+{
+    int r = sz / 2 - 1;
+    gfx_circle(s, x + sz / 2, y + sz / 2, r, c);
+    gfx_circle(s, x + sz / 2 + r / 2, y + sz / 2 - r / 3, r * 3 / 4, bg);
+    gfx_circle(s, x + sz / 5, y + sz / 5, 1, c);
+}
+
+static color_t icon_bg = 0;
+
 static void draw_icon(surface_t *s, int kind, int x, int y, int sz, color_t c)
 {
+    if (kind == 6)
+    {
+        icon_moon(s, x, y, sz, c, icon_bg);
+        return;
+    }
+
     switch (kind)
     {
         case 0: icon_phone(s, x, y, sz, c); break;
@@ -508,68 +534,87 @@ static void draw_row(surface_t *s, int x, int y, int w, int h, const ui_row_t *r
     }
 }
 
-static void scrollbar(surface_t *s, int x, int y, int h, int first, int visible, int count)
-{
-    if (count <= visible)
-        return;
-    gfx_rrect(s, x, y, 4, h, 2, RGB(214, 222, 233));
-    int th = h * visible / count;
-    if (th < 12)
-        th = 12;
-    int ty = y + (h - th) * first / (count - visible);
-    gfx_rrect(s, x, ty, 4, th, 2, C_ACCENT);
-}
 
-void ui_browser_bottom(const ui_row_t *rows, int count, int sel, int scroll,
-                       const char *search, const char *const *tabs, int ntabs, int tab,
+void ui_browser_bottom(const ui_row_t *rows, int count, int sel, int scroll_px, int cursor_px,
+                       const char *search, const char *const *tabs, int ntabs, int tab, int tab_px,
                        const char *empty_text)
 {
     surface_t *s = &scr_bot;
     ui_hits_clear();
     ui_background(s);
 
+    // List (drawn first so the header covers rows scrolling underneath)
+    const int top = LIST_TOP, rh = 26, step = BROWSER_STEP, bottom = 175;
+    gfx_clip(s, 0, top - 3, SCR_W, bottom - top + 3);
+    if (count == 0)
+        gfx_text_center(s, 128, 96, empty_text ? empty_text : "Niets gevonden", FONT_BOLD, C_DIM);
+    int first = scroll_px / step;
+    if (first < 0)
+        first = 0;
+    // Sliding selection highlight
+    if (count > 0)
+    {
+        int cy = top + cursor_px - scroll_px;
+        gfx_rrect(s, 6, cy - 2, 238, rh + 4, 9, C_ACCENT);
+    }
+    for (int idx = first; idx < count && idx < first + BROWSER_ROWS + 2; idx++)
+    {
+        int y = top + idx * step - scroll_px;
+        if (y > bottom)
+            break;
+        // Row card (white) on top of the highlight; selected one tinted
+        bool is_sel = idx == sel;
+        if (!is_sel)
+            gfx_rrect_blend(s, 8, y + 1, 234, rh, 7, RGB(0, 30, 70), 26);
+        draw_row(s, 8, y, 234, rh, &rows[idx], false, 0);
+        if (is_sel)
+            gfx_rrect_blend(s, 8, y, 234, rh, 7, C_ACCENT, 18);
+        if (y + rh > top && y < bottom)
+            ui_hit_add(HIT_ROW + idx, 6, (y - 2 < top ? top : y - 2), 238, rh + 4);
+    }
+    gfx_noclip(s);
+    if (count > BROWSER_ROWS)
+    {
+        int maxs = (count - BROWSER_ROWS) * step;
+        int track = 4 * step - 4;
+        gfx_rrect(s, 248, top, 4, track, 2, RGB(214, 222, 233));
+        int th = track * BROWSER_ROWS / count;
+        if (th < 12)
+            th = 12;
+        int sp = scroll_px < 0 ? 0 : scroll_px > maxs ? maxs : scroll_px;
+        gfx_rrect(s, 248, top + (track - th) * sp / (maxs ? maxs : 1), 4, th, 2, C_ACCENT);
+    }
+
+    // Header background (covers rows sliding under it)
+    {
+        color_t *src = bg_cache;
+        if (src)
+            memcpy(s->px, src, SCR_W * (top - 3) * 2);
+    }
+
     // Search field + menu button
     gfx_rrect_blend(s, 6, 6, 186, 22, 11, RGB(0, 30, 70), 30);
     gfx_rrect(s, 6, 5, 186, 22, 11, C_WHITE);
     icon_search(s, 14, 9, C_DIM);
     if (search && search[0])
-        gfx_text_fit(s, 32, 9, 150, search, FONT_BODY, C_TEXT);
+        gfx_text_fit(s, 32, 9, 136, search, FONT_BODY, C_TEXT);
     else
         gfx_text(s, 32, 9, "Zoeken", FONT_BODY, C_FAINT);
     ui_key_glyph(s, 173, 9, "Y", C_FAINT);
     ui_hit_add(HIT_SEARCH, 6, 5, 186, 22);
     ui_button(s, HIT_MENU, 197, 5, 53, 22, "X", "Menu", false);
 
-    // Category tabs
+    // Category tabs with a sliding pill
     int tw = (SCR_W - 12) / ntabs;
+    gfx_rrect(s, 6 + tab_px + 1, 32, tw - 2, 18, 9, C_ACCENT);
     for (int i = 0; i < ntabs; i++)
     {
         int x = 6 + i * tw;
-        if (i == tab)
-        {
-            gfx_rrect(s, x + 1, 32, tw - 2, 18, 9, C_ACCENT);
-            gfx_text_center(s, x + tw / 2, 34, tabs[i], FONT_BOLD, C_WHITE);
-        }
-        else
-        {
-            gfx_text_center(s, x + tw / 2, 34, tabs[i], FONT_BOLD, C_DIM);
-        }
+        int pill_center = 6 + tab_px + tw / 2;
+        bool on_pill = abs((x + tw / 2) - pill_center) < tw / 2;
+        gfx_text_center(s, x + tw / 2, 34, tabs[i], FONT_BOLD, on_pill ? C_WHITE : (i == tab ? C_ACCENT : C_DIM));
         ui_hit_add(HIT_TAB + i, x, 30, tw, 22);
     }
-
-    // List
-    const int top = 56, rh = 26;
-    if (count == 0)
-    {
-        gfx_text_center(s, 128, 96, empty_text ? empty_text : "Niets gevonden", FONT_BOLD, C_DIM);
-    }
-    for (int i = 0; i < BROWSER_ROWS && scroll + i < count; i++)
-    {
-        int idx = scroll + i;
-        draw_row(s, 8, top + i * (rh + 4), 234, rh, &rows[idx], idx == sel, 0);
-        ui_hit_add(HIT_ROW + idx, 6, top + i * (rh + 4) - 2, 238, rh + 4);
-    }
-    scrollbar(s, 248, top, 4 * (rh + 4) - 4, scroll, BROWSER_ROWS, count);
 
     // Footer
     gfx_blend(s, 0, 176, SCR_W, 16, C_WHITE, 200);
@@ -590,17 +635,19 @@ void ui_browser_bottom(const ui_row_t *rows, int count, int sel, int scroll,
 }
 
 void ui_dialog(const char *title, const char *text, const char *const *labels,
-               const char *const *keys, int nbuttons, int primary)
+               const char *const *keys, int nbuttons, int primary, int anim, int pressed)
 {
     surface_t *s = &scr_bot;
     ui_hits_clear();
     gfx_noclip(s);
-    gfx_blend(s, 0, 0, SCR_W, SCR_H, RGB(20, 30, 45), 120);
+    if (anim < 0)
+        anim = 0;
+    if (anim > 256)
+        anim = 256;
+    gfx_blend(s, 0, 0, SCR_W, SCR_H, RGB(20, 30, 45), 120 * anim / 256);
 
-    // Measure text height
     int lines = 0;
     {
-        // count lines by drawing into a clipped-away area
         surface_t tmp = *s;
         tmp.cx0 = tmp.cx1 = 0;
         tmp.cy0 = tmp.cy1 = 0;
@@ -609,20 +656,37 @@ void ui_dialog(const char *title, const char *text, const char *const *labels,
     int h = 34 + lines * 14 + 12 + (nbuttons ? 30 : 0);
     if (h < 80)
         h = 80;
-    int y = (SCR_H - h) / 2;
-    ui_card(s, 16, y, 224, h);
-    gfx_rrect(s, 16, y, 224, 6, 3, C_ACCENT);
-    gfx_fill(s, 16, y + 3, 224, 3, C_WHITE);
-    gfx_text_fit(s, 30, y + 10, 196, title, FONT_TITLE, C_TEXT);
-    gfx_text_wrap(s, 30, y + 32, 196, 7, 14, text ? text : "", FONT_BODY, C_DIM);
+    // Pop in: slide up a bit and grow from 92% to 100%
+    int y = (SCR_H - h) / 2 + (256 - anim) * 24 / 256;
+    int shrink = (256 - anim) * 9 / 256;
+    int cx = 16 + shrink, cw = 224 - shrink * 2;
+    if (anim < 40)
+        return; // only the dimming in the first frames
+
+    ui_card(s, cx, y, cw, h);
+    gfx_rrect(s, cx, y, cw, 6, 3, C_ACCENT);
+    gfx_fill(s, cx, y + 3, cw, 3, C_WHITE);
+    gfx_clip(s, cx, y, cw, h);
+    gfx_text_fit(s, cx + 14, y + 10, cw - 28, title, FONT_TITLE, C_TEXT);
+    gfx_text_wrap(s, cx + 14, y + 32, cw - 28, 7, 14, text ? text : "", FONT_BODY, C_DIM);
 
     if (nbuttons > 0)
     {
-        int bw = (204 - (nbuttons - 1) * 6) / nbuttons;
+        int bw = (cw - 20 - (nbuttons - 1) * 6) / nbuttons;
         for (int i = 0; i < nbuttons; i++)
-            ui_button(s, HIT_BTN + i, 26 + i * (bw + 6), y + h - 32, bw, 24,
-                      keys ? keys[i] : NULL, labels[i], i == primary);
+        {
+            int bx = cx + 10 + i * (bw + 6), by = y + h - 32;
+            if (i == pressed)
+            {
+                // pressed: sink 1px and darken
+                ui_button(s, HIT_BTN + i, bx, by + 1, bw, 24, keys ? keys[i] : NULL, labels[i], i == primary);
+                gfx_rrect_blend(s, bx, by + 1, bw, 24, 12, RGB(0, 20, 60), 50);
+            }
+            else
+                ui_button(s, HIT_BTN + i, bx, by, bw, 24, keys ? keys[i] : NULL, labels[i], i == primary);
+        }
     }
+    gfx_noclip(s);
 }
 
 static void fmt_size(unsigned long b, char *o, size_t n)
@@ -702,8 +766,17 @@ void ui_progress_screen(const char *title, const char *name, const char *status,
     ui_button(s, HIT_BTN, 64, 160, 128, 24, "B", cancel_label ? cancel_label : "Annuleren", false);
 }
 
+void ui_menu_tile_pos(int i, int *x, int *y)
+{
+    const int cols = 4, tw = 56, th = 64, gx = 6, gy = 8, x0 = 9, y0 = 30;
+    (void)th;
+    *x = x0 + (i % cols) * (tw + gx);
+    *y = y0 + (i / cols) * (64 + gy);
+}
+
 void ui_menu(const ui_tile_t *tiles, int n, int sel, const char *top_title,
-             const char *top_text, bool wifi, int bars, const char *ssid)
+             const char *top_text, bool wifi, int bars, const char *ssid,
+             int anim, int ring_x, int ring_y)
 {
     // Top: description of the selected tile
     surface_t *t = &scr_top;
@@ -713,6 +786,8 @@ void ui_menu(const ui_tile_t *tiles, int n, int sel, const char *top_title,
     if (sel >= 0 && sel < n)
     {
         gfx_rrect(t, 104, 42, 48, 48, 14, tiles[sel].color);
+        gfx_rrect_blend(t, 106, 44, 44, 20, 10, C_WHITE, 50);
+        icon_bg = tiles[sel].color;
         draw_icon(t, tiles[sel].icon, 112, 50, 32, C_WHITE);
     }
     gfx_text_center(t, 128, 98, top_title ? top_title : "", FONT_TITLE, C_TEXT);
@@ -724,17 +799,32 @@ void ui_menu(const ui_tile_t *tiles, int n, int sel, const char *top_title,
     ui_hits_clear();
     ui_background(s);
     gfx_text(s, 10, 6, "Menu", FONT_TITLE, C_TEXT);
-    const int cols = 3, tw = 76, th = 64, gx = 7, gy = 8, x0 = 9, y0 = 28;
+    const int tw = 56, th = 64;
+
+    // Selection ring (slides between tiles)
+    if (anim >= 256)
+        gfx_rrect(s, ring_x - 3, ring_y - 3, tw + 6, th + 6, 12, C_ACCENT);
+
     for (int i = 0; i < n; i++)
     {
-        int x = x0 + (i % cols) * (tw + gx), y = y0 + (i / cols) * (th + gy);
-        if (i == sel)
-            gfx_rrect(s, x - 3, y - 3, tw + 6, th + 6, 13, C_ACCENT);
+        int x, y;
+        ui_menu_tile_pos(i, &x, &y);
+        // Staggered pop-in: each tile starts a little later
+        int ti = anim * 2 - i * 40;
+        if (ti <= 0)
+            continue;
+        if (ti > 256)
+            ti = 256;
+        int u = 256 - ti;
+        int dy = (u * u / 256) * 18 / 256;
+        y += dy;
         ui_card(s, x, y, tw, th);
         gfx_rrect(s, x + tw / 2 - 14, y + 8, 28, 28, 9, tiles[i].color);
+        gfx_rrect_blend(s, x + tw / 2 - 13, y + 9, 26, 12, 6, C_WHITE, 50);
+        icon_bg = tiles[i].color;
         draw_icon(s, tiles[i].icon, x + tw / 2 - 10, y + 12, 20, C_WHITE);
-        gfx_clip(s, x + 2, y, tw - 4, th);
-        gfx_text_center(s, x + tw / 2, y + 42, tiles[i].label, FONT_BOLD, C_TEXT);
+        gfx_clip(s, x + 1, y, tw - 2, th);
+        gfx_text_center(s, x + tw / 2, y + 42, tiles[i].label, gfx_text_w(tiles[i].label, FONT_BOLD) > tw - 4 ? FONT_SMALL : FONT_BOLD, C_TEXT);
         gfx_noclip(s);
         ui_hit_add(HIT_TILE + i, x, y, tw, th);
     }
@@ -820,7 +910,7 @@ void ui_splash(const char *const *lines, int nlines, int frame)
 }
 
 void ui_list_screen(const char *header, const char *subheader, const ui_row_t *rows,
-                    int count, int sel, int scroll, int icon_kind,
+                    int count, int sel, int scroll_px, int cursor_px, int icon_kind,
                     const char *const *labels, const char *const *keys, int nbuttons,
                     const char *empty_text)
 {
@@ -828,25 +918,54 @@ void ui_list_screen(const char *header, const char *subheader, const ui_row_t *r
     ui_hits_clear();
     ui_background(s);
 
+    const int top = 32, rh = 28, step = LIST_STEP, bottom = nbuttons > 0 ? 165 : 190;
+    gfx_clip(s, 0, top - 3, SCR_W, bottom - top + 3);
+    if (count == 0)
+        gfx_text_center(s, 128, 80, empty_text ? empty_text : "Leeg", FONT_BOLD, C_DIM);
+    if (count > 0)
+        gfx_rrect(s, 6, top + cursor_px - scroll_px - 2, 238, rh + 4, 9, C_ACCENT);
+    int first = scroll_px / step;
+    if (first < 0)
+        first = 0;
+    for (int idx = first; idx < count && idx < first + LIST_ROWS + 2; idx++)
+    {
+        int y = top + idx * step - scroll_px;
+        if (y > bottom)
+            break;
+        if (idx != sel)
+            gfx_rrect_blend(s, 8, y + 1, 234, rh, 7, RGB(0, 30, 70), 26);
+        draw_row(s, 8, y, 234, rh, &rows[idx], false, icon_kind);
+        if (idx == sel)
+            gfx_rrect_blend(s, 8, y, 234, rh, 7, C_ACCENT, 18);
+        if (y + rh > top && y < bottom)
+            ui_hit_add(HIT_ROW + idx, 6, (y - 1 < top ? top : y - 1), 238, step);
+    }
+    gfx_noclip(s);
+    if (count > LIST_ROWS)
+    {
+        int maxs = (count - LIST_ROWS) * step;
+        int track = LIST_ROWS * step - 3;
+        gfx_rrect(s, 248, top, 4, track, 2, RGB(214, 222, 233));
+        int th = track * LIST_ROWS / count;
+        if (th < 12)
+            th = 12;
+        int sp = scroll_px < 0 ? 0 : scroll_px > maxs ? maxs : scroll_px;
+        gfx_rrect(s, 248, top + (track - th) * sp / (maxs ? maxs : 1), 4, th, 2, C_ACCENT);
+    }
+
+    // Header over the list
+    if (bg_cache)
+        memcpy(s->px, bg_cache, SCR_W * 29 * 2);
     gfx_fill(s, 0, 0, SCR_W, 26, C_WHITE);
     gfx_blend(s, 0, 26, SCR_W, 1, RGB(0, 30, 70), 40);
     gfx_text_fit(s, 10, 1, 236, header, FONT_BOLD, C_TEXT);
     if (subheader)
         gfx_text_fit(s, 10, 13, 236, subheader, FONT_SMALL, C_ACCENT2);
 
-    const int top = 32, rh = 28, step = 33;
-    if (count == 0)
-        gfx_text_center(s, 128, 80, empty_text ? empty_text : "Leeg", FONT_BOLD, C_DIM);
-    for (int i = 0; i < LIST_ROWS && scroll + i < count; i++)
-    {
-        int idx = scroll + i;
-        draw_row(s, 8, top + i * step, 234, rh, &rows[idx], idx == sel, icon_kind);
-        ui_hit_add(HIT_ROW + idx, 6, top + i * step - 1, 238, step);
-    }
-    scrollbar(s, 248, top, LIST_ROWS * step - 3, scroll, LIST_ROWS, count);
-
     if (nbuttons > 0)
     {
+        if (bg_cache)
+            memcpy(s->px + 166 * SCR_W, bg_cache + 166 * SCR_W, SCR_W * 26 * 2);
         gfx_blend(s, 0, 166, SCR_W, 26, C_WHITE, 170);
         int bw = (244 - (nbuttons - 1) * 4) / nbuttons;
         for (int i = 0; i < nbuttons; i++)
@@ -1056,12 +1175,18 @@ void ui_keyboard(const ui_kbd_t *k)
         color_t bg = kk->code == KB_OK ? C_ACCENT : active ? C_ACCENT_L : special ? RGB(241, 244, 249) : C_WHITE;
         gfx_rrect_blend(s, kk->x, kk->y + 1, kk->w, kk->h, 6, RGB(0, 30, 70), 50);
         gfx_rrect(s, kk->x, kk->y, kk->w, kk->h, 6, bg);
+        if (i == k->pressed_key && k->press_t > 0)
+        {
+            // Key pop: lit up and slightly raised
+            gfx_rrect(s, kk->x - 1, kk->y - 2, kk->w + 2, kk->h + 1, 7, C_ACCENT);
+            bg = C_ACCENT;
+        }
         if (i == k->cursor_key)
             gfx_rrect_line(s, kk->x - 1, kk->y - 1, kk->w + 2, kk->h + 2, 7, 2, C_ORANGE);
         int font = special ? FONT_SMALL : FONT_TITLE;
         if (kk->code == KB_OK)
             font = FONT_BOLD;
-        color_t fc = kk->code == KB_OK ? C_WHITE : C_TEXT;
+        color_t fc = (kk->code == KB_OK || (i == k->pressed_key && k->press_t > 0)) ? C_WHITE : C_TEXT;
         int lh = font == FONT_TITLE ? 16 : 12;
         if (kk->code == KB_SHIFT && !k->symbols)
             icon_up(s, kk->x + kk->w / 2 - 6, kk->y + 6, 12, active ? C_ACCENT : C_TEXT);

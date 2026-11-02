@@ -18,6 +18,8 @@ typedef struct {
 extern volatile uint32_t g_frames;
 
 void app_wait_frame(void);          // waits one vblank
+// Moves cur towards target (smooth ease-out). Returns the new value.
+int app_ease(int cur, int target);
 input_t app_input(void);            // reads keys + touch
 
 // Dialog on the bottom screen. keys: "A", "B", "X", "Y", "L", "R", "START"...

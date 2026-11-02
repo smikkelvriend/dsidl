@@ -25,6 +25,15 @@ extern surface_t scr_top, scr_bot;
 
 void gfx_init(void);      // platform: set up video, allocate buffers
 void gfx_present(void);   // platform: copy back buffers to the screens
+void gfx_present_top(void);
+void gfx_present_bot(void);
+
+// Animated change to the next presented frame (platform)
+enum { TR_NONE, TR_LEFT, TR_RIGHT, TR_UP_BOT, TR_DOWN_BOT, TR_FADE };
+void gfx_transition(int kind);
+
+// Moves a rectangle's pixels horizontally by dx, filling the gap with 'fill'
+void gfx_shift_x(surface_t *s, int x, int y, int w, int h, int dx, color_t fill);
 
 void gfx_clip(surface_t *s, int x, int y, int w, int h);
 void gfx_noclip(surface_t *s);

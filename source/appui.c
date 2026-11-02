@@ -19,6 +19,20 @@ void app_wait_frame(void)
     g_frames++;
 }
 
+int app_ease(int cur, int target)
+{
+    int d = target - cur;
+    if (d == 0)
+        return cur;
+    if (d > -2 && d < 2)
+        return target;
+    // Move about a third of the remaining distance each frame
+    int step = d / 3;
+    if (step == 0)
+        step = d > 0 ? 1 : -1;
+    return cur + step;
+}
+
 input_t app_input(void)
 {
     input_t in = { 0 };
@@ -78,13 +92,27 @@ static uint32_t key_mask(const char *k)
 int app_dialog(const char *title, const char *text, const char *const *labels,
                const char *const *keys, int n, int primary)
 {
-    // Keep what's behind so the dialog can be redrawn on the same backdrop
+    // Keep what's behind so the dialog can be animated over it
     color_t *backup = malloc(SCR_W * SCR_H * 2);
     if (backup)
         memcpy(backup, scr_bot.px, SCR_W * SCR_H * 2);
 
-    ui_dialog(title, text, labels, keys, n, primary);
-    gfx_present();
+    // Pop in
+    for (int a = 32; a <= 256; a += 32)
+    {
+        if (backup)
+            memcpy(scr_bot.px, backup, SCR_W * SCR_H * 2);
+        ui_dialog(title, text, labels, keys, n, primary, a, -1);
+        app_wait_frame();
+        gfx_present_bot();
+        if (!backup)
+            break;
+    }
+    if (!backup)
+    {
+        ui_dialog(title, text, labels, keys, n, primary, 256, -1);
+        gfx_present_bot();
+    }
 
     bool b_used = false;
     for (int i = 0; i < n; i++)
@@ -92,9 +120,6 @@ int app_dialog(const char *title, const char *text, const char *const *labels,
             b_used = true;
 
     int result = -1;
-    // Ignore keys still held from before the dialog opened
-    for (int i = 0; i < 2; i++)
-        app_wait_frame();
     while (1)
     {
         app_wait_frame();
@@ -113,6 +138,22 @@ int app_dialog(const char *title, const char *text, const char *const *labels,
 done:
     if (backup)
     {
+        // Show the press, then shrink away
+        if (result >= 0)
+        {
+            memcpy(scr_bot.px, backup, SCR_W * SCR_H * 2);
+            ui_dialog(title, text, labels, keys, n, primary, 256, result);
+            gfx_present_bot();
+            for (int i = 0; i < 4; i++)
+                app_wait_frame();
+        }
+        for (int a = 192; a >= 0; a -= 64)
+        {
+            memcpy(scr_bot.px, backup, SCR_W * SCR_H * 2);
+            ui_dialog(title, text, labels, keys, n, primary, a, -1);
+            app_wait_frame();
+            gfx_present_bot();
+        }
         memcpy(scr_bot.px, backup, SCR_W * SCR_H * 2);
         free(backup);
     }
@@ -136,7 +177,7 @@ bool app_confirm(const char *title, const char *text, const char *yes, const cha
 void app_status(const char *title, const char *text)
 {
     ui_background(&scr_bot);
-    ui_dialog(title, text, NULL, NULL, 0, 0);
+    ui_dialog(title, text, NULL, NULL, 0, 0, 256, -1);
     gfx_present();
 }
 
@@ -150,7 +191,7 @@ void app_wifi_info(bool *connected, int *bars, const char **ssid)
 bool app_text_input(const char *title, const char *hint, char *buf, size_t size,
                     bool password)
 {
-    ui_kbd_t k = { title, hint, buf, size, false, false, false, 11 };
+    ui_kbd_t k = { title, hint, buf, size, false, false, false, 11, -1, 0 };
     bool ok = false;
 
     bool c;
@@ -175,8 +216,7 @@ bool app_text_input(const char *title, const char *hint, char *buf, size_t size,
 
     bool dirty = true;
     int repeat = 0;
-    for (int i = 0; i < 2; i++)
-        app_wait_frame();
+    gfx_transition(TR_UP_BOT); // keyboard slides up
     while (1)
     {
         if (dirty)
@@ -187,6 +227,8 @@ bool app_text_input(const char *title, const char *hint, char *buf, size_t size,
         }
         app_wait_frame();
         input_t in = app_input();
+        if (k.press_t > 0 && --k.press_t == 0)
+            dirty = true;
 
         u32 nav = in.down;
         if (in.held & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT))
@@ -221,10 +263,27 @@ bool app_text_input(const char *title, const char *hint, char *buf, size_t size,
             code = KB_BACK;
         }
 
+        if (code != 0)
+        {
+            int pk = k.cursor_key;
+            if (in.down & KEY_START)
+                pk = -1;
+            if (in.down & KEY_B)
+                pk = -1;
+            k.pressed_key = pk;
+            k.press_t = 5;
+            dirty = true;
+        }
+
         size_t len = strlen(buf);
         if (code == KB_OK)
         {
             ok = true;
+            // show the OK press briefly
+            ui_keyboard(&k);
+            gfx_present_bot();
+            for (int i = 0; i < 4; i++)
+                app_wait_frame();
             break;
         }
         else if (code == KB_BACK)
@@ -256,5 +315,6 @@ bool app_text_input(const char *title, const char *hint, char *buf, size_t size,
             dirty = true;
         }
     }
+    gfx_transition(TR_DOWN_BOT); // keyboard slides away on the next frame
     return ok;
 }

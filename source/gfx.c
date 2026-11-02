@@ -397,3 +397,32 @@ int gfx_text_wrap(surface_t *s, int x, int y, int w, int max_lines, int line_h,
     }
     return lines;
 }
+
+void gfx_shift_x(surface_t *s, int x, int y, int w, int h, int dx, color_t fill)
+{
+    if (dx == 0 || w <= 0)
+        return;
+    if (dx >= w || -dx >= w)
+    {
+        gfx_fill(s, x, y, w, h, fill);
+        return;
+    }
+    for (int yy = y; yy < y + h && yy < SCR_H; yy++)
+    {
+        if (yy < 0)
+            continue;
+        color_t *row = &s->px[yy * SCR_W + x];
+        if (dx > 0)
+        {
+            memmove(row + dx, row, (w - dx) * 2);
+            for (int i = 0; i < dx; i++)
+                row[i] = fill;
+        }
+        else
+        {
+            memmove(row, row - dx, (w + dx) * 2);
+            for (int i = w + dx; i < w; i++)
+                row[i] = fill;
+        }
+    }
+}

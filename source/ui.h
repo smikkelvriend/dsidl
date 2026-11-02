@@ -101,14 +101,17 @@ enum {
 };
 
 void ui_browser_top(const ui_item_t *it, bool wifi, int bars, const char *ssid);
-void ui_browser_bottom(const ui_row_t *rows, int count, int sel, int scroll,
-                       const char *search, const char *const *tabs, int ntabs, int tab,
+void ui_browser_bottom(const ui_row_t *rows, int count, int sel, int scroll_px, int cursor_px,
+                       const char *search, const char *const *tabs, int ntabs, int tab, int tab_px,
                        const char *empty_text);
 #define BROWSER_ROWS 4
+#define BROWSER_STEP 30
+#define LIST_TOP 56
 
 // Dialog over the bottom screen. buttons: labels, keys ("A", "B", "Y"...)
+// anim: 0..256 (pop-in progress), pressed: button shown pressed (-1 none)
 void ui_dialog(const char *title, const char *text, const char *const *labels,
-               const char *const *keys, int nbuttons, int primary);
+               const char *const *keys, int nbuttons, int primary, int anim, int pressed);
 
 void ui_progress_screen(const char *title, const char *name, const char *status,
                         unsigned long done, unsigned long total,
@@ -116,11 +119,13 @@ void ui_progress_screen(const char *title, const char *name, const char *status,
 
 typedef struct {
     const char *label;
-    int icon;              // 0 phone, 1 wifi, 2 refresh, 3 star, 4 info, 5 back
+    int icon;              // 0 phone, 1 wifi, 2 refresh, 3 update, 4 info, 5 back, 6 moon
     color_t color;
 } ui_tile_t;
 void ui_menu(const ui_tile_t *tiles, int n, int sel, const char *top_title,
-             const char *top_text, bool wifi, int bars, const char *ssid);
+             const char *top_text, bool wifi, int bars, const char *ssid,
+             int anim, int ring_x, int ring_y);
+void ui_menu_tile_pos(int i, int *x, int *y);
 
 void ui_server_top(const char *url);
 void ui_server_bottom(const char *url, bool busy, const char *what, const char *name,
@@ -131,10 +136,11 @@ void ui_splash(const char *const *lines, int nlines, int frame);
 
 // Generic list screen (folder picker, wifi): header + rows + footer buttons
 void ui_list_screen(const char *header, const char *subheader, const ui_row_t *rows,
-                    int count, int sel, int scroll, int icon_kind,
+                    int count, int sel, int scroll_px, int cursor_px, int icon_kind,
                     const char *const *labels, const char *const *keys, int nbuttons,
                     const char *empty_text);
 #define LIST_ROWS 4
+#define LIST_STEP 33
 // icon_kind: 0 = letter tile, 1 = folder, 2 = wifi (badge "1".."4" = bars,
 // subtitle "lock" -> lock icon)
 
@@ -151,6 +157,8 @@ typedef struct {
     bool shift;
     bool symbols;
     int cursor_key;      // key index highlighted for D-pad use
+    int pressed_key;     // key that was just pressed (flash)
+    int press_t;         // frames left for the flash
 } ui_kbd_t;
 void ui_keyboard(const ui_kbd_t *k);
 int  ui_kbd_count(const ui_kbd_t *k);
