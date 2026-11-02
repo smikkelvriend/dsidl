@@ -104,14 +104,16 @@ static int wait_fd(int fd, bool for_write, int timeout_ms)
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(fd, &fds);
-        struct timeval tv = { 0, 20 * 1000 };
+        // Poll only (zero timeout): dswifi ignores select() timeouts when
+        // nothing happens on the socket, which would block forever.
+        struct timeval tv = { 0, 0 };
         int r = select(fd + 1, for_write ? NULL : &fds, for_write ? &fds : NULL, NULL, &tv);
         if (r > 0)
             return 1;
         if (r < 0)
             return -1;
-        cothread_yield();
-        waited += 20;
+        cothread_yield_irq(IRQ_VBLANK); // ~17 ms
+        waited += 17;
         if (waited >= timeout_ms)
             return 0;
     }

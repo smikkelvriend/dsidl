@@ -30,14 +30,14 @@ static bool send_all(int fd, const void *data, size_t len)
         fd_set wfds;
         FD_ZERO(&wfds);
         FD_SET(fd, &wfds);
-        struct timeval tv = { 0, 20 * 1000 };
+        struct timeval tv = { 0, 0 }; // poll, see recv_wait()
         int s = select(fd + 1, NULL, &wfds, NULL, &tv);
         if (s < 0)
             return false;
         if (s == 0)
         {
-            cothread_yield();
-            idle += 20;
+            cothread_yield_irq(IRQ_VBLANK);
+            idle += 17;
             if (idle > 20000)
                 return false;
             continue;
@@ -63,14 +63,16 @@ static int recv_wait(int fd, void *buf, size_t len, server_state_t *st, int idle
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(fd, &rfds);
-        struct timeval tv = { 0, 20 * 1000 };
+        // Poll only: dswifi doesn't honour select() timeouts while the socket
+        // is idle, so a real timeout would block forever (and ignore B).
+        struct timeval tv = { 0, 0 };
         int r = select(fd + 1, &rfds, NULL, NULL, &tv);
         if (r > 0)
             return recv(fd, buf, len, 0);
         if (r < 0)
             return -1;
-        cothread_yield();
-        waited += 20;
+        cothread_yield_irq(IRQ_VBLANK);
+        waited += 17;
         if (waited >= idle_ms)
             return -1;
     }
@@ -669,11 +671,11 @@ bool server_run(server_state_t *st, const char *default_dir)
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(ls, &rfds);
-        struct timeval tv = { 0, 100 * 1000 };
+        struct timeval tv = { 0, 0 }; // poll so that B (stop) is noticed
         int r = select(ls + 1, &rfds, NULL, NULL, &tv);
         if (r <= 0)
         {
-            cothread_yield();
+            cothread_yield_irq(IRQ_VBLANK);
             continue;
         }
 
@@ -681,8 +683,6 @@ bool server_run(server_state_t *st, const char *default_dir)
         if (c < 0)
             continue;
 
-        struct timeval to = { 30, 0 };
-        setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof(to));
         handle_client(c, st, default_dir);
         shutdown(c, SHUT_RDWR);
         closesocket(c);
