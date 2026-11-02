@@ -96,6 +96,17 @@ static void load_settings(void)
     fclose(f);
 }
 
+static void write_settings(void)
+{
+    FILE *f = fopen(SETTINGS_FILE, "w");
+    if (!f)
+        return;
+    fprintf(f, "# DSiDL instellingen\n");
+    fprintf(f, "save_dir=%s\n", save_dir);
+    fprintf(f, "update_url=%s\n", update_base);
+    fclose(f);
+}
+
 static void save_default_settings(void)
 {
     if (file_exists(SETTINGS_FILE))
@@ -661,6 +672,204 @@ static int run_job_ui(job_t type, const char *title)
 }
 
 // ---------------------------------------------------------------------------
+// Folder picker (for choosing where a download goes)
+
+#define PICK_MAX 256
+#define PICK_ROWS 16
+
+static int cmp_names(const void *a, const void *b)
+{
+    return strcasecmp(*(char *const *)a, *(char *const *)b);
+}
+
+// Lists sub folders of 'dir' into names[]. Returns count.
+static int list_dirs(const char *dir, char **names, int max)
+{
+    char path[300];
+    // The drive root needs a trailing slash for opendir()
+    if (strchr(dir, '/') == NULL || strcmp(strchr(dir, '/'), "/") == 0)
+        snprintf(path, sizeof(path), "%s/", drive);
+    else
+        snprintf(path, sizeof(path), "%s", dir);
+
+    int n = 0;
+    DIR *d = opendir(path);
+    if (!d)
+        return 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL && n < max)
+    {
+        if (de->d_type != DT_DIR || de->d_name[0] == '.')
+            continue;
+        if (strcasecmp(de->d_name, "_nds") == 0 || strcasecmp(de->d_name, "_dsidl") == 0)
+            continue; // system folders, not for games
+        names[n++] = strdup(de->d_name);
+    }
+    closedir(d);
+    qsort(names, n, sizeof(char *), cmp_names);
+    return n;
+}
+
+static bool is_drive_root(const char *dir)
+{
+    const char *p = strchr(dir, ':');
+    return p && (p[1] == '\0' || (p[1] == '/' && p[2] == '\0'));
+}
+
+// Lets the user browse to a folder. 'dir' is in/out ("sd:/roms/nds").
+static bool folder_picker(char *dir, size_t dirlen)
+{
+    char cur[256];
+    snprintf(cur, sizeof(cur), "%s", dir);
+    // Fall back to the root if the folder doesn't exist (yet)
+    DIR *test = opendir(cur);
+    if (test)
+        closedir(test);
+    else
+        snprintf(cur, sizeof(cur), "%s", drive);
+
+    char *names[PICK_MAX];
+    int n = list_dirs(cur, names, PICK_MAX);
+    int sel = 0, scroll = 0;
+    bool dirty = true, chosen = false;
+
+    while (1)
+    {
+        bool root = is_drive_root(cur);
+        int total = n + (root ? 0 : 1); // first row ".." when not at root
+
+        if (dirty)
+        {
+            if (sel >= total)
+                sel = total > 0 ? total - 1 : 0;
+            if (sel < scroll)
+                scroll = sel;
+            if (sel >= scroll + PICK_ROWS)
+                scroll = sel - PICK_ROWS + 1;
+
+            consoleSelect(&bottom);
+            consoleClear();
+            color(33, 1);
+            printf("Map kiezen\n");
+            reset_color();
+            color(36, 1);
+            printf("%.32s\n", root ? "sd:/ (hoofdmap)" : cur);
+            reset_color();
+            printf("--------------------------------");
+            if (total == 0)
+                printf("  (geen submappen)\n");
+            for (int i = scroll; i < total && i < scroll + PICK_ROWS; i++)
+            {
+                const char *label = (!root && i == 0) ? ".. (omhoog)" : names[i - (root ? 0 : 1)];
+                if (i == sel)
+                {
+                    color(32, 1);
+                    printf(">%-31.31s", label);
+                    reset_color();
+                }
+                else
+                {
+                    printf(" %-31.31s", label);
+                }
+            }
+            printf("\x1b[20;0H");
+            printf("A openen    X hier opslaan\n");
+            printf("Y nieuwe map  B annuleren\n");
+            dirty = false;
+        }
+
+        cothread_yield_irq(IRQ_VBLANK);
+        scanKeys();
+        u32 k = keysDown();
+
+        if ((k & KEY_DOWN) && sel + 1 < total) { sel++; dirty = true; }
+        if ((k & KEY_UP) && sel > 0) { sel--; dirty = true; }
+        if (k & KEY_RIGHT) { sel += PICK_ROWS; if (sel >= total) sel = total - 1; if (sel < 0) sel = 0; dirty = true; }
+        if (k & KEY_LEFT) { sel -= PICK_ROWS; if (sel < 0) sel = 0; dirty = true; }
+
+        if (k & KEY_B)
+            break;
+        if (k & KEY_X)
+        {
+            chosen = true;
+            break;
+        }
+
+        bool go_up = false;
+        const char *enter = NULL;
+        if ((k & KEY_A) && total > 0)
+        {
+            if (!root && sel == 0)
+                go_up = true;
+            else
+                enter = names[sel - (root ? 0 : 1)];
+        }
+        if ((k & KEY_L) && !root)
+            go_up = true;
+
+        if (k & KEY_Y)
+        {
+            char nm[64] = "";
+            if (ui_text_input("Naam nieuwe map", NULL, nm, sizeof(nm)))
+            {
+                sanitize_filename(nm);
+                if (nm[0])
+                {
+                    char np[300];
+                    snprintf(np, sizeof(np), "%s%s%s", cur, root ? (cur[strlen(cur) - 1] == '/' ? "" : "/") : "/", nm);
+                    mkdir(np, 0777);
+                    snprintf(cur, sizeof(cur), "%s", np); // go into the new folder
+                }
+            }
+            go_up = false;
+            enter = NULL;
+            for (int i = 0; i < n; i++) free(names[i]);
+            n = list_dirs(cur, names, PICK_MAX);
+            sel = scroll = 0;
+            dirty = true;
+            continue;
+        }
+
+        if (go_up || enter)
+        {
+            if (go_up)
+            {
+                char *slash = strrchr(cur, '/');
+                if (slash)
+                {
+                    *slash = '\0';
+                    if (!strchr(cur, '/')) // back at "sd:"
+                        snprintf(cur, sizeof(cur), "%s", drive);
+                }
+            }
+            else
+            {
+                char np[300];
+                snprintf(np, sizeof(np), "%s%s%s", cur, root ? (cur[strlen(cur) - 1] == '/' ? "" : "/") : "/", enter);
+                snprintf(cur, sizeof(cur), "%s", np);
+            }
+            for (int i = 0; i < n; i++) free(names[i]);
+            n = list_dirs(cur, names, PICK_MAX);
+            sel = scroll = 0;
+            dirty = true;
+        }
+    }
+
+    for (int i = 0; i < n; i++)
+        free(names[i]);
+
+    if (chosen)
+    {
+        // Normalise: "sd:" or "sd:/" -> "sd:/" ; strip trailing slash otherwise
+        if (is_drive_root(cur))
+            snprintf(dir, dirlen, "%s", drive);
+        else
+            snprintf(dir, dirlen, "%s", cur);
+    }
+    return chosen;
+}
+
+// ---------------------------------------------------------------------------
 // Actions
 
 static bool ensure_wifi(void)
@@ -700,17 +909,55 @@ static void download_selected(void)
     char name[128];
     snprintf(name, sizeof(name), "%s", d->name);
     sanitize_filename(name);
-    mkdir_p(save_dir);
-    snprintf(job_path, sizeof(job_path), "%s/%s", save_dir, name);
     snprintf(job_url, sizeof(job_url), "%s", d->url);
 
-    char q[200];
     char sz[16];
     format_size(d->size, sz, sizeof(sz));
-    snprintf(q, sizeof(q), "%s (%s) downloaden naar %s?%s", name, sz, save_dir,
-             file_exists(job_path) ? "\n\nHet bestaat al en wordt vervangen." : "");
-    if (!confirm(e->title, q))
-        return;
+
+    // Confirm screen: A = download, Y = choose another folder, B = cancel
+    while (1)
+    {
+        snprintf(job_path, sizeof(job_path), "%s%s%s", save_dir,
+                 save_dir[strlen(save_dir) - 1] == ':' ? "/" : "/", name);
+        bool exists = file_exists(job_path);
+
+        consoleSelect(&bottom);
+        consoleClear();
+        color(33, 1);
+        printf("%.32s\n\n", e->title);
+        reset_color();
+        printf("Bestand: %.23s\n", name);
+        printf("Grootte: %s\n\n", sz);
+        printf("Opslaan in:\n");
+        color(36, 1);
+        printf("%.64s\n", save_dir);
+        reset_color();
+        if (exists)
+            printf("\nBestaat al, wordt vervangen.\n");
+        printf("\x1b[19;0H");
+        printf("A downloaden\n");
+        printf("Y andere map kiezen\n");
+        printf("B annuleren\n");
+
+        u32 k;
+        do
+        {
+            cothread_yield_irq(IRQ_VBLANK);
+            scanKeys();
+            k = keysDown();
+        } while (!(k & (KEY_A | KEY_B | KEY_Y)));
+
+        if (k & KEY_B)
+            return;
+        if (k & KEY_Y)
+        {
+            if (folder_picker(save_dir, sizeof(save_dir)))
+                write_settings(); // remember the choice for next time
+            continue;
+        }
+        break;
+    }
+    mkdir_p(save_dir);
 
     int r = run_job_ui(JOB_DOWNLOAD, e->title);
     if (r == 200)

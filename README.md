@@ -3,7 +3,7 @@
 Homebrew-downloader voor de (gemodde) Nintendo DSi. Alles werkt op de DSi zelf via wifi:
 
 - **Lijst + zoeken**: haalt de homebrew-catalogus van [Universal-DB](https://db.universal-team.net) op (dezelfde bron als Universal-Updater), toont alle DS/DSi-titels met een `.nds`- of `.dsi`-bestand en laat je zoeken en filteren.
-- **Downloaden**: de gekozen titel komt direct op je SD-kaart in `sd:/roms/nds/`.
+- **Downloaden naar een map naar keuze**: standaard `sd:/roms/nds/`; druk bij het downloaden op **Y** om door je SD-kaart te bladeren en een andere map te kiezen (of een nieuwe te maken). DSiDL onthoudt de laatst gekozen map.
 - **Bestanden beheren vanaf je telefoon**: de DSi wordt een mini-webserver. Open het getoonde adres (bv. `http://192.168.1.23`) in de browser van je telefoon: blader door de hele SD-kaart, upload naar elke map, download naar je telefoon, maak mappen, hernoem, verwijder, en verberg of toon bestanden/mappen (bv. een map die je in TWiLight Menu++ verborgen hebt).
 - **Wifi-beheer**: zoek netwerken, kies er een en typ het wachtwoord met het schermtoetsenbord. Netwerken worden bewaard in `sd:/_dsidl/wifi.txt` (niet in het interne geheugen van de DSi) en DSiDL verbindt daarna automatisch met het sterkste bekende netwerk. De netwerken uit de DSi-instellingen werken ook gewoon.
 - **Zichzelf updaten**: via het menu haalt DSiDL de nieuwste versie van GitHub en vervangt zijn eigen `.nds`-bestand.
@@ -22,7 +22,7 @@ De eerste keer haalt hij de lijst op (±2 MB, duurt even). Daarna gebruikt hij d
 |---|---|
 | ↑ ↓ | door de lijst |
 | ← → | pagina omhoog/omlaag |
-| A | downloaden |
+| A | downloaden (daarna Y = andere map kiezen) |
 | L / R | ander bestand kiezen als een titel er meerdere heeft (bv. `.nds` en `.dsi`) |
 | Y | zoeken (toetsenbord op het onderste scherm) |
 | B | zoekopdracht wissen / annuleren |
