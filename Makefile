@@ -3,7 +3,7 @@
 BLOCKSDS	?= /opt/blocksds/core
 BLOCKSDSEXT	?= /opt/blocksds/external
 
-APP_VERSION	?= 2.3.0
+APP_VERSION	?= 2.4.0
 
 NAME		:= dsidl
 GAME_TITLE	:= DSiDL
@@ -14,7 +14,7 @@ GAME_ICON	:= icon.bmp
 SOURCEDIRS	:= source
 BINDIRS		:= data
 
-DEFINES		:= -DAPP_VERSION=\"$(APP_VERSION)\" \
+DEFINES		:= -DAPP_VERSION=\"$(APP_VERSION)\" -DHAVE_CONFIG_H \
 		   -DMBEDTLS_USER_CONFIG_FILE=\"nds_mbedtls_config.h\"
 
 ARM7ELF		:= $(BLOCKSDS)/sys/arm7/main_core/arm7_dswifi_maxmod.elf

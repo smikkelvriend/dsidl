@@ -24,6 +24,7 @@
 #include "ui.h"
 #include "appui.h"
 #include "unzip.h"
+#include "rarx.h"
 #include "img.h"
 #include "sound.h"
 #include "ndsscan.h"
@@ -52,7 +53,7 @@ static const char *categories[] = { "alles", "game", "emulator", "utility", "app
 static char self_path[256] = "";
 static char save_dir[128];
 static char update_base[200] = UPDATE_BASE;
-static bool set_dark = false, set_sound = true;
+static bool set_dark = false, set_sound = true, set_show_hidden = true;
 static int set_accent = 0;
 #define wifi_ok wifi_connected()
 static char WIFI_FILE[64];
@@ -62,7 +63,7 @@ static char WIFI_FILE[64];
 
 typedef enum { JOB_NONE, JOB_CATALOG, JOB_DOWNLOAD, JOB_UPDATE_CHECK,
                JOB_UPDATE_INSTALL, JOB_SERVER, JOB_TWL_CHECK, JOB_TWL_DOWNLOAD,
-               JOB_TWL_EXTRACT, JOB_COPY, JOB_BOXART, JOB_SCAN, JOB_DRIVE_LIST, JOB_UNZIP } job_t;
+               JOB_TWL_EXTRACT, JOB_COPY, JOB_BOXART, JOB_SCAN, JOB_DRIVE_LIST, JOB_UNZIP, JOB_UNRAR } job_t;
 
 static volatile bool job_running = false;
 static volatile int job_result;
@@ -104,6 +105,8 @@ static void load_settings(void)
             set_accent = atoi(line + 7);
         else if (strncmp(line, "sound=", 6) == 0)
             set_sound = atoi(line + 6) != 0;
+        else if (strncmp(line, "show_hidden=", 12) == 0)
+            set_show_hidden = atoi(line + 12) != 0;
     }
     fclose(f);
 }
@@ -119,6 +122,7 @@ static void write_settings(void)
     fprintf(f, "theme=%s\n", set_dark ? "dark" : "light");
     fprintf(f, "accent=%d\n", set_accent);
     fprintf(f, "sound=%d\n", set_sound ? 1 : 0);
+    fprintf(f, "show_hidden=%d\n", set_show_hidden ? 1 : 0);
     fclose(f);
 }
 
@@ -464,6 +468,10 @@ static int job_main(void *arg)
         case JOB_UNZIP:
             // job_path = zip, job_url = destination folder
             r = unzip_all(job_path, job_url, &prog, &unzip_files, job_err, sizeof(job_err)) ? 200 : -1;
+            break;
+        case JOB_UNRAR:
+            // job_path = rar, job_url = destination folder
+            r = rar_extract_all(job_path, job_url, &prog, &unzip_files, job_err, sizeof(job_err)) ? 200 : -1;
             break;
         case JOB_SCAN:
             nds_free(&installed);
@@ -1670,6 +1678,43 @@ static void software_screen(void)
     gfx_transition(TR_RIGHT);
 }
 
+static bool ends_with(const char *s, const char *suf)
+{
+    size_t a = strlen(s), b = strlen(suf);
+    return a >= b && strcasecmp(s + a - b, suf) == 0;
+}
+
+// Extracts a .zip or .rar into dest_dir. Shows the result; returns success.
+static bool extract_archive(const char *arc, const char *dest_dir, const char *name, bool remove_after)
+{
+    const char *dest = is_drive_root(dest_dir) ? drive : dest_dir;
+    bool rar = ends_with(arc, ".rar");
+    char src[300];
+    snprintf(src, sizeof(src), "%s", arc);
+    snprintf(job_path, sizeof(job_path), "%s", src);
+    snprintf(job_url, sizeof(job_url), "%s", dest);
+    int r = run_job_ui(rar ? JOB_UNRAR : JOB_UNZIP, "Uitpakken", name);
+    char msg[400];
+    if (r != 200)
+    {
+        sound_play(SND_ERROR);
+        snprintf(msg, sizeof(msg), "%s\n\n%s staat nog in %s%s.", job_err, name, dest_dir,
+                 is_drive_root(dest_dir) ? "/" : "");
+        app_message("Uitpakken mislukt", msg);
+        return false;
+    }
+    if (remove_after)
+        remove(src);
+    nds_free(&installed);
+    nds_scan(&installed, drive, 1000);
+    sound_play(SND_SUCCESS);
+    snprintf(msg, sizeof(msg), "%s is uitgepakt (%d bestand%s) in %s%s.%s", name, unzip_files,
+             unzip_files == 1 ? "" : "en", dest_dir, is_drive_root(dest_dir) ? "/" : "",
+             remove_after ? (rar ? " Het rar-bestand is verwijderd." : " Het zip-bestand is verwijderd.") : "");
+    app_message("Klaar", msg);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // File manager on the DSi
 
@@ -1687,7 +1732,7 @@ static int cmp_fentry(const void *a, const void *b)
     return strcasecmp(x->name, y->name);
 }
 
-static int list_files(const char *dir, fentry_t **out)
+static int list_files(const char *dir, fentry_t **out, bool show_hidden)
 {
     char path[300];
     snprintf(path, sizeof(path), "%s%s", dir, is_drive_root(dir) ? "/" : "");
@@ -1717,7 +1762,12 @@ static int list_files(const char *dir, fentry_t **out)
         struct stat st;
         e->size = (!e->dir && stat(full, &st) == 0) ? (unsigned long)st.st_size : 0;
         int attr = FAT_getAttr(full);
-        e->hidden = attr >= 0 && (attr & ATTR_HIDDEN);
+        e->hidden = (attr >= 0 && (attr & ATTR_HIDDEN)) || de->d_name[0] == '.';
+        if (e->hidden && !show_hidden)
+        {
+            free(e->name);
+            continue;
+        }
         if (e->name)
             n++;
         if ((n & 15) == 0)
@@ -1755,7 +1805,8 @@ static void files_top(int sel)
         snprintf(l1, sizeof(l1), "!%s vrij van %s", a, b);
     }
     snprintf(l2, sizeof(l2), "Map: %s%s", fm_dir, is_drive_root(fm_dir) ? "/" : "");
-    const char *lines[] = { l1, "", l2, "", "A: openen of opties   L: omhoog", "Y: nieuwe map" };
+    const char *lines[] = { l1, "", l2, "", "A: openen of opties   Y: nieuwe map",
+                            set_show_hidden ? "X: verborgen mappen verbergen" : "X: verborgen mappen tonen" };
     ui_info_top("Bestanden", lines, 6, c, bars, ssid);
 }
 
@@ -1767,7 +1818,7 @@ static void files_screen(void)
     while (1)
     {
         fentry_t *fs;
-        int n = list_files(fm_dir, &fs);
+        int n = list_files(fm_dir, &fs, set_show_hidden);
         bool root = is_drive_root(fm_dir);
         int total = n + (root ? 0 : 1);
         ui_row_t *r = calloc(total + 1, sizeof(ui_row_t));
@@ -1803,17 +1854,27 @@ static void files_screen(void)
                 cat = "app";
             r[i + off] = (ui_row_t){ e->name, subs[i + off], cat, NULL, NULL, e->dir ? 1 : 0 };
         }
-        static const char *labels[] = { "Openen", "Nieuwe map", "Terug" };
-        static const char *keys[] = { "A", "Y", "B" };
+        const char *labels[] = { "Openen", "Nieuwe map", set_show_hidden ? "Verbergen" : "Verborgen", "Terug" };
+        static const char *keys[] = { "A", "Y", "X", "B" };
         char shown[300];
-        snprintf(shown, sizeof(shown), "%s%s", fm_dir, root ? "/" : "");
-        int res = run_list("Bestanden", shown, r, total, &sel, 3, labels, keys, 3, "Lege map", files_top);
+        snprintf(shown, sizeof(shown), "%s%s%s", fm_dir, root ? "/" : "",
+                 set_show_hidden ? "" : "  (verborgen uit)");
+        int res = run_list("Bestanden", shown, r, total, &sel, 3, labels, keys, 4,
+                           set_show_hidden ? "Lege map" : "Lege map (verborgen items uit)", files_top);
         free(r);
         free(subs);
 
-        if (res == -1 || res == -12)
+        if (res == -12)
         {
-            if (root || res == -12)
+            set_show_hidden = !set_show_hidden;
+            write_settings();
+            sound_play(SND_TICK);
+            free_files(fs, n);
+            continue;
+        }
+        if (res == -1 || res == -13)
+        {
+            if (root || res == -13)
             {
                 free_files(fs, n);
                 break;
@@ -1885,8 +1946,25 @@ static void files_screen(void)
         }
         else
         {
-            static const char *fopts[] = { "Verplaatsen naar...", "Kopiëren naar...", "Naam wijzigen", "Verbergen / zichtbaar", "Verwijderen", "Terug" };
-            res = choose(e->name, "Bestand", fopts, 6);
+            bool arc = ends_with(e->name, ".zip") || ends_with(e->name, ".rar");
+            if (arc)
+            {
+                static const char *aopts[] = { "Uitpakken hier", "Verplaatsen naar...", "Kopiëren naar...", "Naam wijzigen", "Verbergen / zichtbaar", "Verwijderen", "Terug" };
+                res = choose(e->name, "Archief", aopts, 7);
+                if (res == 0)
+                {
+                    extract_archive(full, fm_dir, e->name, false);
+                    free_files(fs, n);
+                    continue;
+                }
+                if (res > 0)
+                    res--;
+            }
+            else
+            {
+                static const char *fopts[] = { "Verplaatsen naar...", "Kopiëren naar...", "Naam wijzigen", "Verbergen / zichtbaar", "Verwijderen", "Terug" };
+                res = choose(e->name, "Bestand", fopts, 6);
+            }
         }
 
         bool prot = !strcasecmp(e->name, "_nds") || !strcasecmp(e->name, "_dsidl");
@@ -2068,12 +2146,6 @@ static void write_drive_link(const char *link)
     }
 }
 
-static bool ends_with(const char *s, const char *suf)
-{
-    size_t a = strlen(s), b = strlen(suf);
-    return a >= b && strcasecmp(s + a - b, suf) == 0;
-}
-
 static void drive_top(int sel)
 {
     (void)sel;
@@ -2090,7 +2162,7 @@ static void drive_top(int sel)
         snprintf(l1, sizeof(l1), "!%s vrij op je SD-kaart", a);
     }
     snprintf(l2, sizeof(l2), "Downloads gaan naar %s%s", save_dir, is_drive_root(save_dir) ? "/" : "");
-    const char *lines[] = { l1, "", "Je eigen bestanden uit je Google Drive-map.", ".zip-bestanden worden automatisch uitgepakt en daarna verwijderd.", "", l2 };
+    const char *lines[] = { l1, "", "Je eigen bestanden uit je Google Drive-map.", ".zip en .rar worden automatisch uitgepakt en daarna verwijderd.", "", l2 };
     ui_info_top("Mijn Drive", lines, 6, c, bars, ssid);
 }
 
@@ -2100,10 +2172,10 @@ static void drive_download(const gd_entry_t *e)
     while (1)
     {
         char text[400];
-        bool zip = ends_with(e->name, ".zip");
+        bool zip = ends_with(e->name, ".zip") || ends_with(e->name, ".rar");
         snprintf(text, sizeof(text), "%s\nOpslaan in: %s%s%s", e->name, save_dir, is_drive_root(save_dir) ? "/" : "",
                  zip ? "\nWordt na het downloaden uitgepakt." :
-                 (ends_with(e->name, ".7z") || ends_with(e->name, ".rar")) ? "\n.7z/.rar kan de DSi niet uitpakken; gebruik .zip." : "");
+                 ends_with(e->name, ".7z") ? "\n.7z kan de DSi niet uitpakken; gebruik .zip of .rar." : "");
         static const char *labels[] = { "Terug", "Andere map", "Download" };
         static const char *keys[] = { "B", "Y", "A" };
         int ch = app_dialog("Downloaden", text, labels, keys, 3, 2);
@@ -2153,29 +2225,16 @@ static void drive_download(const gd_entry_t *e)
         return;
     }
 
-    char msg[400];
-    if (ends_with(name, ".zip"))
+    if (ends_with(name, ".zip") || ends_with(name, ".rar"))
     {
-        char zip[300];
-        snprintf(zip, sizeof(zip), "%s", job_path);
-        snprintf(job_url, sizeof(job_url), "%s", dest);
-        r = run_job_ui(JOB_UNZIP, "Uitpakken", name);
-        if (r == 200)
-        {
-            remove(zip); // zip no longer needed
-            snprintf(msg, sizeof(msg), "%s is uitgepakt (%d bestanden) in %s%s. Het zip-bestand is verwijderd.",
-                     name, unzip_files, save_dir, is_drive_root(save_dir) ? "/" : "");
-        }
-        else
-        {
-            sound_play(SND_ERROR);
-            snprintf(msg, sizeof(msg), "%s\n\nHet zip-bestand staat nog in %s.", job_err, save_dir);
-            app_message("Uitpakken mislukt", msg);
-            return;
-        }
+        char arc[300];
+        snprintf(arc, sizeof(arc), "%s", job_path);
+        extract_archive(arc, save_dir, name, true);
+        build_rows();
+        return;
     }
-    else
-        snprintf(msg, sizeof(msg), "Opgeslagen als %s", job_path);
+    char msg[400];
+    snprintf(msg, sizeof(msg), "Opgeslagen als %s", job_path);
     nds_free(&installed);
     nds_scan(&installed, drive, 1000);
     build_rows();
