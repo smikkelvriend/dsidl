@@ -1,5 +1,7 @@
 # DSiDL
 
+Een grafische app met aanraakscherm: lijst met kaarten, zoeken met een eigen schermtoetsenbord, tabbladen per soort, voortgang met snelheid en resterende tijd, en een QR-code om je telefoon te verbinden.
+
 Homebrew-downloader voor de (gemodde) Nintendo DSi. Alles werkt op de DSi zelf via wifi:
 
 - **Lijst + zoeken**: haalt de homebrew-catalogus van [Universal-DB](https://db.universal-team.net) op (dezelfde bron als Universal-Updater), toont alle DS/DSi-titels met een `.nds`- of `.dsi`-bestand en laat je zoeken en filteren.
@@ -24,11 +26,15 @@ De eerste keer haalt hij de lijst op (±2 MB, duurt even). Daarna gebruikt hij d
 | ← → | pagina omhoog/omlaag |
 | A | downloaden (daarna Y = andere map kiezen) |
 | L / R | ander bestand kiezen als een titel er meerdere heeft (bv. `.nds` en `.dsi`) |
-| Y | zoeken (toetsenbord op het onderste scherm) |
+| Y | zoeken (toetsenbord op het onderste scherm; ook: tik op het zoekveld) |
 | B | zoekopdracht wissen / annuleren |
-| SELECT | soort wisselen: alles, game, emulator, utility, app |
+| SELECT | soort wisselen (of tik op de tabbladen) |
 | X | menu: telefoon (bestanden beheren), wifi-netwerken, lijst vernieuwen, DSiDL updaten |
 | START | afsluiten |
+
+Alles werkt ook met het aanraakscherm: tik op een titel om hem te kiezen, tik nog een keer om te downloaden, sleep de lijst om te scrollen.
+
+**Toetsenbord:** tik op toetsen of gebruik de pijltjes en A. B wist (bij een leeg veld: terug), START is klaar, SELECT hoofdletters, X toont/verbergt een wachtwoord.
 
 Houd **B** ingedrukt tijdens het opstarten om niet automatisch te verbinden.
 
@@ -78,4 +84,6 @@ make APP_VERSION=1.0.1
 - Titels die alleen als `.zip`/`.7z` worden aangeboden (bv. TWiLight Menu++, nds-bootstrap) staan niet in de lijst; uitpakken op de DSi zit er (nog) niet in.
 - De DSi heeft geen klok met zekere tijd, dus de geldigheidsdatum van certificaten wordt niet gecontroleerd (de handtekening en de servernaam wel).
 
-Licenties: Mbed TLS (Apache-2.0), rootcertificaten van Mozilla (MPL-2.0), BlocksDS/libnds (zlib).
+Licenties: Mbed TLS (Apache-2.0), rootcertificaten van Mozilla (MPL-2.0), BlocksDS/libnds (zlib), lettertype Poppins (SIL Open Font License), QR Code generator van Project Nayuki (MIT).
+
+Ontwerp bekijken zonder DSi: `cc -Isource tools/preview/host.c source/gfx.c source/ui.c source/font_data.c source/qrcodegen.c -o preview && ./preview` maakt van elk scherm een afbeelding.

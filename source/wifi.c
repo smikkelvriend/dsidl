@@ -12,8 +12,9 @@
 #include <dswifi9.h>
 
 #include "wifi.h"
-
-extern PrintConsole top, bottom;
+#include "gfx.h"
+#include "ui.h"
+#include "appui.h"
 
 #define MAX_SAVED 24
 #define MAX_APS   32
@@ -32,6 +33,21 @@ static int num_aps;
 
 static bool connected;
 static char cur_ssid[33];
+static int cur_bars;
+static void (*status_cb)(const char *text);
+
+void wifi_set_status_callback(void (*cb)(const char *text))
+{
+    status_cb = cb;
+}
+
+static void status(const char *fmt, const char *arg)
+{
+    static char line[80];
+    snprintf(line, sizeof(line), fmt, arg);
+    if (status_cb)
+        status_cb(line);
+}
 
 bool wifi_connected(void)
 {
@@ -43,14 +59,9 @@ const char *wifi_ssid(void)
     return cur_ssid;
 }
 
-static void color(int c, int bright)
+int wifi_bars(void)
 {
-    printf("\x1b[%d;%dm", c, bright);
-}
-
-static void reset_color(void)
-{
-    printf("\x1b[39;0m");
+    return wifi_connected() ? (cur_bars > 0 ? cur_bars : 3) : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -240,13 +251,17 @@ static bool connect_ap(Wifi_AccessPoint *ap, const char *pass)
         int s = Wifi_AssocStatus();
         if (s != last)
         {
-            printf("  %s...\n", status_text(s));
+            char t[80];
+            snprintf(t, sizeof(t), "%s: %s", ap->ssid, status_text(s));
+            if (status_cb)
+                status_cb(t);
             last = s;
         }
         if (s == ASSOCSTATUS_ASSOCIATED)
         {
             connected = true;
             snprintf(cur_ssid, sizeof(cur_ssid), "%s", ap->ssid);
+            cur_bars = signal_bars(ap);
             return true;
         }
         if (s == ASSOCSTATUS_CANNOTCONNECT)
@@ -269,7 +284,7 @@ static bool auto_connect(void)
         saved_net_t *s = find_saved(aps[i].ssid);
         if (!s || !(aps[i].flags & WFLAG_APDATA_COMPATIBLE))
             continue;
-        printf("Verbinden met %.20s\n", aps[i].ssid);
+        status("Verbinden met %.24s", aps[i].ssid);
         if (connect_ap(&aps[i], s->pass))
             return true;
     }
@@ -279,7 +294,7 @@ static bool auto_connect(void)
     {
         if (!(aps[i].flags & WFLAG_APDATA_CONFIG_IN_WFC))
             continue;
-        printf("Verbinden met %.20s\n", aps[i].ssid);
+        status("Verbinden met %.24s", aps[i].ssid);
         if (connect_ap(&aps[i], NULL))
             return true;
     }
@@ -315,7 +330,7 @@ bool wifi_start(const char *saved_file, bool autoconnect)
     if (!autoconnect)
         return false;
 
-    printf("Netwerken zoeken...\n");
+    status("%s", "Netwerken zoeken");
     scan_for(150);
     return auto_connect();
 }
@@ -323,90 +338,68 @@ bool wifi_start(const char *saved_file, bool autoconnect)
 // ---------------------------------------------------------------------------
 // Manager screen
 
-static void draw_manager(int sel, int scroll)
+static char conn_status[96];
+
+static void conn_cb(const char *t)
 {
-    consoleSelect(&top);
-    consoleClear();
-    color(31, 1);
-    printf("Wifi-netwerken\n");
-    reset_color();
-    printf("--------------------------------");
-    printf("%s-modus: %s\n\n", isDSiMode() ? "DSi" : "DS",
-           isDSiMode() ? "WPA2, WPA, WEP, open" : "alleen WEP en open");
-    printf("A  verbinden\n");
-    printf("Y  wachtwoord (opnieuw) invoeren\n");
-    printf("X  opgeslagen netwerk vergeten\n");
-    printf("R  opnieuw zoeken\n");
-    printf("B  terug\n\n");
-    printf("Signaal: ");
-    color(32, 1);
-    printf("||||");
-    reset_color();
-    printf(" sterk  ");
-    color(31, 0);
-    printf("|");
-    reset_color();
-    printf(" zwak\n\n");
-    color(33, 1);
-    printf("*");
-    reset_color();
-    printf(" = opgeslagen in DSiDL\n");
-    color(36, 1);
-    printf("D");
-    reset_color();
-    printf(" = staat in DSi-instellingen\n\n");
-    printf("Wachtwoorden staan in\n%.32s\n", saved_path);
-
-    consoleSelect(&bottom);
-    consoleClear();
-    if (num_aps == 0)
-    {
-        printf("\n Zoeken naar netwerken...\n");
-        return;
-    }
-    const int rows = 22;
-    for (int i = scroll; i < num_aps && i < scroll + rows; i++)
-    {
-        Wifi_AccessPoint *ap = &aps[i];
-        int bars = signal_bars(ap);
-        bool ok = ap->flags & WFLAG_APDATA_COMPATIBLE;
-        bool sv = find_saved(ap->ssid) != NULL;
-        bool wfc = ap->flags & WFLAG_APDATA_CONFIG_IN_WFC;
-
-        if (i == sel)
-            color(32, 1);
-        printf("%c", i == sel ? '>' : ' ');
-        printf("%-19.19s", ap->ssid);
-        if (i == sel)
-            reset_color();
-
-        color(33, 1);
-        printf("%c", sv ? '*' : ' ');
-        color(36, 1);
-        printf("%c", wfc ? 'D' : ' ');
-        reset_color();
-
-        const char *sec = ok ? Wifi_ApSecurityTypeString(ap->security_type) : "n.o.";
-        printf("%-5.5s", sec);
-
-        color(bars >= 3 ? 32 : bars == 2 ? 33 : 31, bars >= 3);
-        for (int b = 0; b < 4; b++)
-            printf("%c", b < bars ? '|' : ' ');
-        reset_color();
-        printf("\n");
-    }
+    snprintf(conn_status, sizeof(conn_status), "%s", t);
+    app_status("Verbinden...", conn_status);
 }
 
-static void wait_key(void)
+static void draw_manager(int sel, int scroll)
 {
-    printf("\nDruk op A");
-    while (1)
+    static ui_row_t rows[MAX_APS];
+    static char subs[MAX_APS][48];
+    static char bars[MAX_APS][2];
+
+    for (int i = 0; i < num_aps; i++)
     {
-        cothread_yield_irq(IRQ_VBLANK);
-        scanKeys();
-        if (keysDown() & (KEY_A | KEY_B))
-            return;
+        Wifi_AccessPoint *ap = &aps[i];
+        bool ok = ap->flags & WFLAG_APDATA_COMPATIBLE;
+        bool open = ap->security_type == AP_SECURITY_OPEN;
+        const char *extra = find_saved(ap->ssid) ? " - opgeslagen" :
+                            (ap->flags & WFLAG_APDATA_CONFIG_IN_WFC) ? " - DSi-instellingen" : "";
+        if (!ok)
+            snprintf(subs[i], sizeof(subs[i]), "lock %s - niet ondersteund",
+                     Wifi_ApSecurityTypeString(ap->security_type));
+        else if (open)
+            snprintf(subs[i], sizeof(subs[i]), "Open netwerk%s", extra);
+        else
+            snprintf(subs[i], sizeof(subs[i]), "lock %s%s",
+                     Wifi_ApSecurityTypeString(ap->security_type), extra);
+        bars[i][0] = '0' + signal_bars(ap);
+        bars[i][1] = 0;
+        rows[i].title = ap->ssid;
+        rows[i].subtitle = subs[i];
+        rows[i].category = NULL;
+        rows[i].badge = bars[i];
     }
+
+    const char *lines[6];
+    char l0[80];
+    int n = 0;
+    if (wifi_connected())
+    {
+        u32 ip = Wifi_GetIP();
+        snprintf(l0, sizeof(l0), "!Verbonden met %s (%lu.%lu.%lu.%lu)", cur_ssid,
+                 ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, ip >> 24);
+        lines[n++] = l0;
+    }
+    else
+        lines[n++] = "!Nu niet verbonden (zoeken verbreekt de verbinding)";
+    lines[n++] = isDSiMode() ? "DSi-modus: WPA2, WPA, WEP en open netwerken."
+                             : "DS-modus: alleen WEP en open netwerken.";
+    lines[n++] = "";
+    lines[n++] = "A: verbinden   Y: wachtwoord   X: vergeten   R: zoeken";
+    lines[n++] = "";
+    lines[n++] = "Wachtwoorden worden bewaard in _dsidl/wifi.txt op je SD-kaart.";
+    ui_info_top("Wifi-netwerken", lines, n, wifi_connected(), wifi_bars(), cur_ssid);
+
+    static const char *labels[] = { "Verbinden", "Wachtwoord", "Zoeken", "Terug" };
+    static const char *keys[] = { "A", "Y", "R", "B" };
+    ui_list_screen("Netwerken in de buurt", isDSiMode() ? "DSi-modus - WPA2 ondersteund" : "DS-modus - alleen WEP/open",
+                   rows, num_aps, sel, scroll, 2, labels, keys, 4, "Zoeken naar netwerken...");
+    gfx_present();
 }
 
 static bool try_connect_ui(Wifi_AccessPoint *ap, bool ask_password)
@@ -419,13 +412,9 @@ static bool try_connect_ui(Wifi_AccessPoint *ap, bool ask_password)
 
     if (!(ap->flags & WFLAG_APDATA_COMPATIBLE))
     {
-        consoleSelect(&bottom);
-        consoleClear();
-        printf("Dit netwerk gebruikt beveiliging\ndie in %s-modus niet werkt.\n",
-               isDSiMode() ? "DSi" : "DS");
-        if (!isDSiMode())
-            printf("\nStart DSiDL in DSi-modus voor\nWPA/WPA2 (instelling in je\nloader).\n");
-        wait_key();
+        app_message("Niet ondersteund", isDSiMode()
+            ? "Dit netwerk gebruikt een beveiliging die de DSi niet ondersteunt."
+            : "Dit netwerk gebruikt WPA/WPA2. Start DSiDL in DSi-modus (instelling in je loader) om het te gebruiken.");
         return false;
     }
 
@@ -440,39 +429,33 @@ static bool try_connect_ui(Wifi_AccessPoint *ap, bool ask_password)
         if (s)
             snprintf(pass, sizeof(pass), "%s", s->pass);
         char title[64];
-        snprintf(title, sizeof(title), "Wachtwoord voor %.20s", ap->ssid);
-        if (!ui_text_input(title, "Let op hoofdletters. START = tonen/verbergen", pass, sizeof(pass)))
+        snprintf(title, sizeof(title), "Wachtwoord voor %.32s", ap->ssid);
+        if (!app_text_input(title, "wachtwoord", pass, sizeof(pass), true))
             return false;
         use = pass;
     }
 
-    consoleSelect(&bottom);
-    consoleClear();
-    color(33, 1);
-    printf("Verbinden met\n%.32s\n\n", ap->ssid);
-    reset_color();
-
     Wifi_AccessPoint copy = *ap;
+    snprintf(conn_status, sizeof(conn_status), "%s", ap->ssid);
+    app_status("Verbinden...", conn_status);
+    void (*old)(const char *) = status_cb;
+    status_cb = conn_cb;
     bool ok = connect_ap(&copy, use);
+    status_cb = old;
+
     if (ok)
     {
         if (use != NULL)
             remember(ap->ssid, use);
         u32 ip = Wifi_GetIP();
-        color(32, 1);
-        printf("\nVerbonden!\n");
-        reset_color();
-        printf("IP: %lu.%lu.%lu.%lu\n", ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, ip >> 24);
-        wait_key();
+        char msg[96];
+        snprintf(msg, sizeof(msg), "Verbonden met %s.\nIP-adres: %lu.%lu.%lu.%lu", ap->ssid,
+                 ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, ip >> 24);
+        app_message("Gelukt!", msg);
         return true;
     }
-
-    color(31, 1);
-    printf("\nVerbinden mislukt.\n");
-    reset_color();
-    if (!open)
-        printf("Klopt het wachtwoord? Probeer\nhet opnieuw met Y.\n");
-    wait_key();
+    app_message("Verbinden mislukt", open ? "Het netwerk reageert niet. Probeer het opnieuw of ga dichter bij de router zitten."
+                                          : "Klopt het wachtwoord? Kies het netwerk en druk op Y om het opnieuw in te voeren.");
     return false;
 }
 
@@ -481,15 +464,12 @@ bool wifi_manager(void)
     bool was_connected = wifi_connected();
     bool now_connected = false;
 
-    consoleSelect(&bottom);
-    consoleClear();
-    printf("\n Zoeken naar netwerken...\n");
-    // Scanning drops the current connection
+    app_status("Wifi", "Zoeken naar netwerken...");
     Wifi_DisconnectAP();
     connected = false;
     scan_for(120);
 
-    int sel = 0, scroll = 0;
+    int sel = 0, scroll = 0, drag = 0;
     int frame = 0;
     bool dirty = true;
 
@@ -501,18 +481,17 @@ bool wifi_manager(void)
                 sel = num_aps > 0 ? num_aps - 1 : 0;
             if (sel < scroll)
                 scroll = sel;
-            if (sel >= scroll + 22)
-                scroll = sel - 21;
+            if (sel >= scroll + LIST_ROWS)
+                scroll = sel - LIST_ROWS + 1;
             draw_manager(sel, scroll);
             dirty = false;
         }
 
-        cothread_yield_irq(IRQ_VBLANK);
-        scanKeys();
-        u32 k = keysDown();
+        app_wait_frame();
+        input_t in = app_input();
+        u32 k = in.down;
 
-        // Refresh the list every 3 seconds while scanning
-        if (++frame % 180 == 0)
+        if (++frame % 180 == 0 && !in.touching)
         {
             char keep[33] = "";
             if (num_aps > 0)
@@ -524,42 +503,65 @@ bool wifi_manager(void)
             dirty = true;
         }
 
-        if (k & KEY_DOWN && sel + 1 < num_aps) { sel++; dirty = true; }
-        if (k & KEY_UP && sel > 0) { sel--; dirty = true; }
-        if (k & KEY_R)
+        if (in.drag_dy)
         {
-            consoleSelect(&bottom);
-            consoleClear();
-            printf("\n Opnieuw zoeken...\n");
+            drag += in.drag_dy;
+            while (drag <= -30 && scroll + LIST_ROWS < num_aps) { scroll++; drag += 30; if (sel < scroll) sel = scroll; dirty = true; }
+            while (drag >= 30 && scroll > 0) { scroll--; drag -= 30; if (sel >= scroll + LIST_ROWS) sel = scroll + LIST_ROWS - 1; dirty = true; }
+        }
+        if (!in.touching)
+            drag = 0;
+
+        bool connect = false, ask = false;
+        if (in.hit >= HIT_ROW && in.hit < HIT_ROW + MAX_APS)
+        {
+            if (in.hit - HIT_ROW == sel)
+                connect = true;
+            else
+            {
+                sel = in.hit - HIT_ROW;
+                dirty = true;
+            }
+        }
+        if ((k & KEY_DOWN) && sel + 1 < num_aps) { sel++; dirty = true; }
+        if ((k & KEY_UP) && sel > 0) { sel--; dirty = true; }
+        if ((k & KEY_R) || in.hit == HIT_BTN + 2)
+        {
+            app_status("Wifi", "Opnieuw zoeken...");
             scan_for(120);
             sel = 0;
             dirty = true;
         }
         if ((k & KEY_X) && num_aps > 0 && find_saved(aps[sel].ssid))
         {
-            forget(aps[sel].ssid);
+            char q[80];
+            snprintf(q, sizeof(q), "Opgeslagen wachtwoord van %s vergeten?", aps[sel].ssid);
+            if (app_confirm("Vergeten", q, "Vergeten", "Nee"))
+                forget(aps[sel].ssid);
             dirty = true;
         }
-        if ((k & (KEY_A | KEY_Y)) && num_aps > 0)
+        if ((k & KEY_A) || in.hit == HIT_BTN + 0)
+            connect = true;
+        if ((k & KEY_Y) || in.hit == HIT_BTN + 1)
+            connect = ask = true;
+
+        if (connect && num_aps > 0)
         {
-            if (try_connect_ui(&aps[sel], (k & KEY_Y) != 0))
+            if (try_connect_ui(&aps[sel], ask))
             {
                 now_connected = true;
                 break;
             }
-            Wifi_ScanMode(); // back to scanning for the list
+            Wifi_ScanMode();
             dirty = true;
         }
-        if (k & KEY_B)
+        if ((k & KEY_B) || in.hit == HIT_BTN + 3)
             break;
     }
 
     if (!now_connected && was_connected)
     {
-        // Leaving without choosing: restore a connection
-        consoleSelect(&bottom);
-        consoleClear();
-        printf("Opnieuw verbinden...\n");
+        app_status("Wifi", "Opnieuw verbinden...");
         scan_for(90);
         now_connected = auto_connect();
     }

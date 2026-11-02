@@ -20,6 +20,9 @@
 #include "server.h"
 #include "util.h"
 #include "wifi.h"
+#include "gfx.h"
+#include "ui.h"
+#include "appui.h"
 
 #define CATALOG_URL   "https://db.universal-team.net/data/full.json"
 #define UPDATE_BASE   "https://github.com/smikkelvriend/dsidl/releases/latest/download/"
@@ -27,11 +30,6 @@
 char drive[8] = "sd:";
 static char DATA_DIR[32], CATALOG_FILE[64], SETTINGS_FILE[64];
 
-#define LIST_ROWS 19
-#define COLS 32
-
-PrintConsole top, bottom;
-static Keyboard *kbd;
 
 static catalog_t cat;
 static int *view;          // indices into cat.entries after filtering
@@ -66,15 +64,6 @@ static char job_url[2048];
 static char job_path[300];
 static char remote_version[32];
 
-static void color(int c, int bright)
-{
-    printf("\x1b[%d;%dm", c, bright);
-}
-
-static void reset_color(void)
-{
-    printf("\x1b[39;0m");
-}
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -340,53 +329,12 @@ static void start_job(job_t type)
 }
 
 // ---------------------------------------------------------------------------
-// Drawing
-
-static void print_wrapped(const char *text, int width, int max_lines)
-{
-    if (!text)
-        return;
-    int lines = 0;
-    const char *p = text;
-    while (*p && lines < max_lines)
-    {
-        while (*p == ' ' || *p == '\n')
-        {
-            if (*p == '\n' && lines > 0)
-                ; // collapse newlines
-            p++;
-        }
-        if (!*p)
-            break;
-        int len = strlen(p);
-        int take = len < width ? len : width;
-        const char *nl = memchr(p, '\n', take);
-        if (nl)
-            take = nl - p;
-        else if (take < len)
-        {
-            int t = take;
-            while (t > 0 && p[t] != ' ')
-                t--;
-            if (t > width / 2)
-                take = t;
-        }
-        printf("%.*s", take, p);
-        if (take < width)
-            printf("\n");
-        p += take;
-        lines++;
-    }
-}
-
-// Speed / remaining time measurement. g_frames counts screen refreshes
-// (60 per second) while a job runs.
-static u32 g_frames;
+// Speed / remaining time measurement (g_frames counts 60 Hz frames)
 
 typedef struct {
     u32 last_frame;
     size_t last_done;
-    u32 speed;     // bytes per second, smoothed; 0 = not known yet
+    u32 speed; // bytes per second, smoothed; 0 = unknown
 } rate_t;
 
 static rate_t rate;
@@ -402,267 +350,113 @@ static void rate_update(size_t done)
 {
     if (done < rate.last_done)
     {
-        // Started over (new file or reconnect from scratch)
         rate.last_done = done;
         rate.last_frame = g_frames;
         rate.speed = 0;
         return;
     }
     u32 frames = g_frames - rate.last_frame;
-    if (frames < 60) // measure over at least one second
+    if (frames < 60)
         return;
     u32 inst = (u32)((unsigned long long)(done - rate.last_done) * 60 / frames);
-    // Smooth it so the time doesn't jump around too much
     rate.speed = rate.speed == 0 ? inst : (rate.speed * 3 + inst) / 4;
-    if (rate.speed == 0 && inst == 0)
-        rate.speed = 0;
     rate.last_done = done;
     rate.last_frame = g_frames;
 }
 
-static void format_time(unsigned long secs, char *out, size_t outlen)
+static long rate_eta(size_t done, size_t total)
 {
-    if (secs >= 3600)
-        snprintf(out, outlen, "%lu:%02lu:%02lu", secs / 3600, (secs / 60) % 60, secs % 60);
-    else
-        snprintf(out, outlen, "%lu:%02lu", secs / 60, secs % 60);
+    if (!rate.speed || !total || done >= total)
+        return total && done >= total ? 0 : -1;
+    return (long)((total - done) / rate.speed) + 1;
 }
 
-static void draw_progress_bar(size_t done, size_t total)
+// ---------------------------------------------------------------------------
+// Browser screen
+
+static const char *tab_labels[NUM_CATS] = { "Alles", "Games", "Emu", "Tools", "Apps" };
+static ui_row_t *rows;
+static char (*row_sub)[56];
+
+static void build_rows(void)
 {
-    char a[16], b[16];
-    rate_update(done);
-    format_size(done, a, sizeof(a));
-    if (total > 0)
-    {
-        int pct = (int)((unsigned long long)done * 100 / total);
-        int fill = pct * 30 / 100;
-        printf("[");
-        color(32, 1);
-        for (int i = 0; i < 30; i++)
-            printf("%c", i < fill ? '#' : ' ');
-        reset_color();
-        printf("]\n");
-        format_size(total, b, sizeof(b));
-        printf("%s / %s  (%d%%)\n\n", a, b, pct);
-    }
-    else
-    {
-        printf("%s ontvangen\n\n", a);
-    }
-
-    char spd[16], eta[16];
-    format_size(rate.speed, spd, sizeof(spd));
-    if (rate.speed > 0 && total > done)
-        format_time((unsigned long)((total - done) / rate.speed) + 1, eta, sizeof(eta));
-    else if (total > 0 && done >= total)
-        snprintf(eta, sizeof(eta), "0:00");
-    else
-        snprintf(eta, sizeof(eta), "--:--");
-
-    printf("Snelheid: ");
-    color(36, 1);
-    printf("%s/s\n", rate.speed > 0 ? spd : "...");
-    reset_color();
-    if (total > 0)
-    {
-        printf("Resterend: ");
-        color(33, 1);
-        printf("%s\n", eta);
-        reset_color();
-    }
-}
-
-static void draw_list(void)
-{
-    consoleSelect(&top);
-    consoleClear();
-    color(31, 1);
-    printf("DSiDL " APP_VERSION);
-    reset_color();
-    if (wifi_ok)
-        printf("  %.13s\n", wifi_ssid()[0] ? wifi_ssid() : "wifi aan");
-    else
-        printf("  GEEN WIFI\n");
-
-    printf("Zoek: ");
-    color(33, 1);
-    printf("%.12s", search[0] ? search : "-");
-    reset_color();
-    printf("  Soort: ");
-    color(36, 1);
-    printf("%s\n", categories[category]);
-    reset_color();
-    printf("--------------------------------");
-
-    if (view_count == 0)
-    {
-        printf("\n");
-        if (cat.count == 0)
-            printf(" Geen lijst geladen.\n Druk X > Lijst vernieuwen.\n\n %.30s\n", load_err);
-        else
-            printf(" Niets gevonden.\n Druk B om zoeken te wissen.\n");
+    free(rows);
+    free(row_sub);
+    rows = calloc(view_count + 1, sizeof(ui_row_t));
+    row_sub = calloc(view_count + 1, sizeof(*row_sub));
+    if (!rows || !row_sub)
         return;
+    for (int i = 0; i < view_count; i++)
+    {
+        cat_entry_t *e = &cat.entries[view[i]];
+        char sz[16];
+        format_size(e->dl[0].size, sz, sizeof(sz));
+        if (e->author && e->author[0])
+            snprintf(row_sub[i], sizeof(row_sub[i]), "%.36s - %s", e->author, sz);
+        else
+            snprintf(row_sub[i], sizeof(row_sub[i]), "%s", sz);
+        rows[i].title = e->title;
+        rows[i].subtitle = row_sub[i];
+        rows[i].category = e->category;
+        rows[i].badge = NULL;
+    }
+}
+
+static void draw_browser(void)
+{
+    bool c;
+    int bars;
+    const char *ssid;
+    app_wifi_info(&c, &bars, &ssid);
+
+    if (view_count > 0)
+    {
+        cat_entry_t *e = &cat.entries[view[sel]];
+        if (dl_choice >= e->num_dl)
+            dl_choice = 0;
+        ui_item_t it = { e->title, e->author, e->version, e->category, e->description,
+                         e->dl[dl_choice].name, e->dl[dl_choice].size, dl_choice, e->num_dl };
+        ui_browser_top(&it, c, bars, ssid);
+    }
+    else
+    {
+        ui_browser_top(NULL, c, bars, ssid);
     }
 
     if (sel < scroll)
         scroll = sel;
-    if (sel >= scroll + LIST_ROWS)
-        scroll = sel - LIST_ROWS + 1;
+    if (sel >= scroll + BROWSER_ROWS)
+        scroll = sel - BROWSER_ROWS + 1;
+    if (scroll < 0)
+        scroll = 0;
 
-    for (int row = 0; row < LIST_ROWS && scroll + row < view_count; row++)
-    {
-        int idx = scroll + row;
-        cat_entry_t *e = &cat.entries[view[idx]];
-        if (idx == sel)
-        {
-            color(32, 1);
-            printf(">%-31.31s", e->title);
-            reset_color();
-        }
-        else
-        {
-            printf(" %-31.31s", e->title);
-        }
-    }
-    printf("\x1b[23;0H");
-    printf("%d / %d", sel + 1, view_count);
+    const char *empty = cat.count == 0 ? "Nog geen lijst - X > Lijst" : "Niets gevonden";
+    ui_browser_bottom(rows, view_count, sel, scroll, search, tab_labels, NUM_CATS, category, empty);
+    gfx_present();
 }
 
-static void draw_details(void)
-{
-    consoleSelect(&bottom);
-    consoleClear();
-
-    if (view_count == 0)
-    {
-        printf("\n Y      zoeken\n X      menu\n SELECT soort wisselen\n START  afsluiten\n");
-        return;
-    }
-
-    cat_entry_t *e = &cat.entries[view[sel]];
-    color(33, 1);
-    printf("%.32s", e->title);
-    if (strlen(e->title) < 32)
-        printf("\n");
-    reset_color();
-    printf("door %.24s\n", e->author ? e->author : "?");
-    printf("versie %.12s  [%s]\n", e->version ? e->version : "?",
-           e->category ? e->category : "?");
-    printf("\n");
-    print_wrapped(e->description, 32, 8);
-
-    printf("\x1b[16;0H");
-    if (dl_choice >= e->num_dl)
-        dl_choice = 0;
-    char sz[16];
-    format_size(e->dl[dl_choice].size, sz, sizeof(sz));
-    color(36, 1);
-    printf("%.24s", e->dl[dl_choice].name);
-    reset_color();
-    printf(" %s\n", sz);
-    if (e->num_dl > 1)
-        printf("L/R: ander bestand (%d/%d)\n", dl_choice + 1, e->num_dl);
-    else
-        printf("\n");
-
-    printf("\x1b[19;0H");
-    printf("A downloaden    Y zoeken\n");
-    printf("B zoeken wissen X menu\n");
-    printf("SELECT soort    START stoppen\n");
-}
-
-static void draw_job(const char *title)
-{
-    consoleSelect(&bottom);
-    consoleClear();
-    color(33, 1);
-    printf("%s\n\n", title);
-    reset_color();
-    printf("%.32s\n\n", prog.status);
-    draw_progress_bar(prog.done, prog.total);
-    printf("\x1b[22;0HB: annuleren");
-}
-
-static void draw_server(void)
-{
-    consoleSelect(&bottom);
-    consoleClear();
-    color(33, 1);
-    printf("Ontvangen via wifi\n\n");
-    reset_color();
-    printf("Open op je telefoon (zelfde\nwifi-netwerk) in de browser om\nbestanden te bekijken en sturen:\n\n");
-    color(32, 1);
-    printf("  http://%s\n\n", srv.ip);
-    reset_color();
-    if (srv.receiving || srv.sending)
-    {
-        printf("%s: %.20s\n", srv.sending ? "Naar telefoon" : "Ontvangen", srv.current);
-        draw_progress_bar(srv.done, srv.total);
-    }
-    else
-    {
-        rate_reset(); // start measuring fresh for the next file
-        printf("Wachten op bestanden...\n\n");
-    }
-    printf("\n%.64s\n", srv.last_msg);
-    printf("Ontvangen: %d bestand(en)\n", srv.files_ok);
-    printf("\x1b[22;0HB: stoppen");
-}
-
-static void message(const char *title, const char *text)
-{
-    consoleSelect(&bottom);
-    consoleClear();
-    color(33, 1);
-    printf("%s\n\n", title);
-    reset_color();
-    print_wrapped(text, 32, 16);
-    printf("\x1b[22;0HA: verder");
-    while (1)
-    {
-        cothread_yield_irq(IRQ_VBLANK);
-        scanKeys();
-        if (keysDown() & (KEY_A | KEY_B))
-            break;
-    }
-}
-
-static bool confirm(const char *title, const char *text)
-{
-    consoleSelect(&bottom);
-    consoleClear();
-    color(33, 1);
-    printf("%s\n\n", title);
-    reset_color();
-    print_wrapped(text, 32, 16);
-    printf("\x1b[22;0HA: ja    B: nee");
-    while (1)
-    {
-        cothread_yield_irq(IRQ_VBLANK);
-        scanKeys();
-        u32 k = keysDown();
-        if (k & KEY_A)
-            return true;
-        if (k & KEY_B)
-            return false;
-    }
-}
+// ---------------------------------------------------------------------------
+// Jobs with a progress screen
 
 // Runs a job while showing progress. Returns job result.
-static int run_job_ui(job_t type, const char *title)
+static int run_job_ui(job_t type, const char *title, const char *name)
 {
     start_job(type);
     rate_reset();
     int frame = 0;
     while (job_running)
     {
-        g_frames++;
-        if ((frame++ % 10) == 0)
-            draw_job(title);
-        cothread_yield_irq(IRQ_VBLANK);
-        scanKeys();
-        if (keysDown() & KEY_B)
+        if ((frame++ % 6) == 0)
+        {
+            rate_update(prog.done);
+            ui_progress_screen(title, name, prog.status, prog.done, prog.total, rate.speed,
+                               rate_eta(prog.done, prog.total),
+                               prog.cancel ? "Bezig..." : "Annuleren");
+            gfx_present();
+        }
+        app_wait_frame();
+        input_t in = app_input();
+        if ((in.down & KEY_B) || in.hit == HIT_BTN)
         {
             prog.cancel = true;
             snprintf(prog.status, sizeof(prog.status), "Annuleren...");
@@ -672,22 +466,25 @@ static int run_job_ui(job_t type, const char *title)
 }
 
 // ---------------------------------------------------------------------------
-// Folder picker (for choosing where a download goes)
+// Folder picker
 
 #define PICK_MAX 256
-#define PICK_ROWS 16
 
 static int cmp_names(const void *a, const void *b)
 {
     return strcasecmp(*(char *const *)a, *(char *const *)b);
 }
 
-// Lists sub folders of 'dir' into names[]. Returns count.
+static bool is_drive_root(const char *dir)
+{
+    const char *p = strchr(dir, ':');
+    return p && (p[1] == '\0' || (p[1] == '/' && p[2] == '\0'));
+}
+
 static int list_dirs(const char *dir, char **names, int max)
 {
     char path[300];
-    // The drive root needs a trailing slash for opendir()
-    if (strchr(dir, '/') == NULL || strcmp(strchr(dir, '/'), "/") == 0)
+    if (is_drive_root(dir))
         snprintf(path, sizeof(path), "%s/", drive);
     else
         snprintf(path, sizeof(path), "%s", dir);
@@ -702,7 +499,7 @@ static int list_dirs(const char *dir, char **names, int max)
         if (de->d_type != DT_DIR || de->d_name[0] == '.')
             continue;
         if (strcasecmp(de->d_name, "_nds") == 0 || strcasecmp(de->d_name, "_dsidl") == 0)
-            continue; // system folders, not for games
+            continue;
         names[n++] = strdup(de->d_name);
     }
     closedir(d);
@@ -710,19 +507,19 @@ static int list_dirs(const char *dir, char **names, int max)
     return n;
 }
 
-static bool is_drive_root(const char *dir)
+static void path_join(char *out, size_t outlen, const char *dir, const char *name)
 {
-    const char *p = strchr(dir, ':');
-    return p && (p[1] == '\0' || (p[1] == '/' && p[2] == '\0'));
+    if (is_drive_root(dir))
+        snprintf(out, outlen, "%s/%s", drive, name);
+    else
+        snprintf(out, outlen, "%s/%s", dir, name);
 }
 
-// Lets the user browse to a folder. 'dir' is in/out ("sd:/roms/nds").
 static bool folder_picker(char *dir, size_t dirlen)
 {
     char cur[256];
     snprintf(cur, sizeof(cur), "%s", dir);
-    // Fall back to the root if the folder doesn't exist (yet)
-    DIR *test = opendir(cur);
+    DIR *test = opendir(is_drive_root(cur) ? "sd:/" : cur);
     if (test)
         closedir(test);
     else
@@ -730,66 +527,77 @@ static bool folder_picker(char *dir, size_t dirlen)
 
     char *names[PICK_MAX];
     int n = list_dirs(cur, names, PICK_MAX);
-    int sel = 0, scroll = 0;
+    int sel_i = 0, scr = 0, drag = 0;
     bool dirty = true, chosen = false;
+
+    static const char *labels[] = { "Hier opslaan", "Nieuwe map", "Annuleren" };
+    static const char *keys[] = { "X", "Y", "B" };
 
     while (1)
     {
         bool root = is_drive_root(cur);
-        int total = n + (root ? 0 : 1); // first row ".." when not at root
+        int total = n + (root ? 0 : 1);
 
         if (dirty)
         {
-            if (sel >= total)
-                sel = total > 0 ? total - 1 : 0;
-            if (sel < scroll)
-                scroll = sel;
-            if (sel >= scroll + PICK_ROWS)
-                scroll = sel - PICK_ROWS + 1;
+            if (sel_i >= total)
+                sel_i = total > 0 ? total - 1 : 0;
+            if (sel_i < scr)
+                scr = sel_i;
+            if (sel_i >= scr + LIST_ROWS)
+                scr = sel_i - LIST_ROWS + 1;
 
-            consoleSelect(&bottom);
-            consoleClear();
-            color(33, 1);
-            printf("Map kiezen\n");
-            reset_color();
-            color(36, 1);
-            printf("%.32s\n", root ? "sd:/ (hoofdmap)" : cur);
-            reset_color();
-            printf("--------------------------------");
-            if (total == 0)
-                printf("  (geen submappen)\n");
-            for (int i = scroll; i < total && i < scroll + PICK_ROWS; i++)
+            ui_row_t r[PICK_MAX + 1];
+            for (int i = 0; i < total; i++)
             {
-                const char *label = (!root && i == 0) ? ".. (omhoog)" : names[i - (root ? 0 : 1)];
-                if (i == sel)
-                {
-                    color(32, 1);
-                    printf(">%-31.31s", label);
-                    reset_color();
-                }
-                else
-                {
-                    printf(" %-31.31s", label);
-                }
+                r[i].title = (!root && i == 0) ? ".. (omhoog)" : names[i - (root ? 0 : 1)];
+                r[i].subtitle = NULL;
+                r[i].category = NULL;
+                r[i].badge = NULL;
             }
-            printf("\x1b[20;0H");
-            printf("A openen    X hier opslaan\n");
-            printf("Y nieuwe map  B annuleren\n");
+            char shown[300];
+            snprintf(shown, sizeof(shown), "%s%s", cur, root ? "/" : "");
+
+            bool c;
+            int bars;
+            const char *ssid;
+            app_wifi_info(&c, &bars, &ssid);
+            const char *info[] = {
+                "Kies de map waarin de download komt.",
+                "",
+                "!A: map openen   L: omhoog",
+                "!X: hier opslaan   Y: nieuwe map",
+                "",
+                "DSiDL onthoudt je keuze.",
+            };
+            ui_info_top("Map kiezen", info, 6, c, bars, ssid);
+            ui_list_screen("Map kiezen", shown, r, total, sel_i, scr, 1, labels, keys, 3,
+                           "Geen submappen");
+            gfx_present();
             dirty = false;
         }
 
-        cothread_yield_irq(IRQ_VBLANK);
-        scanKeys();
-        u32 k = keysDown();
+        app_wait_frame();
+        input_t in = app_input();
+        u32 k = in.down;
 
-        if ((k & KEY_DOWN) && sel + 1 < total) { sel++; dirty = true; }
-        if ((k & KEY_UP) && sel > 0) { sel--; dirty = true; }
-        if (k & KEY_RIGHT) { sel += PICK_ROWS; if (sel >= total) sel = total - 1; if (sel < 0) sel = 0; dirty = true; }
-        if (k & KEY_LEFT) { sel -= PICK_ROWS; if (sel < 0) sel = 0; dirty = true; }
+        if (in.drag_dy)
+        {
+            drag += in.drag_dy;
+            while (drag <= -24 && scr + LIST_ROWS < total) { scr++; drag += 24; if (sel_i < scr) sel_i = scr; dirty = true; }
+            while (drag >= 24 && scr > 0) { scr--; drag -= 24; if (sel_i >= scr + LIST_ROWS) sel_i = scr + LIST_ROWS - 1; dirty = true; }
+        }
+        if (!in.touching)
+            drag = 0;
 
-        if (k & KEY_B)
+        if ((k & KEY_DOWN) && sel_i + 1 < total) { sel_i++; dirty = true; }
+        if ((k & KEY_UP) && sel_i > 0) { sel_i--; dirty = true; }
+        if (k & KEY_RIGHT) { sel_i += LIST_ROWS; if (sel_i >= total) sel_i = total - 1; if (sel_i < 0) sel_i = 0; dirty = true; }
+        if (k & KEY_LEFT) { sel_i -= LIST_ROWS; if (sel_i < 0) sel_i = 0; dirty = true; }
+
+        if ((k & KEY_B) || in.hit == HIT_BTN + 2)
             break;
-        if (k & KEY_X)
+        if ((k & KEY_X) || in.hit == HIT_BTN + 0)
         {
             chosen = true;
             break;
@@ -797,35 +605,45 @@ static bool folder_picker(char *dir, size_t dirlen)
 
         bool go_up = false;
         const char *enter = NULL;
-        if ((k & KEY_A) && total > 0)
+        bool activate = (k & KEY_A) != 0;
+        if (in.hit >= HIT_ROW && in.hit < HIT_ROW + 1000)
         {
-            if (!root && sel == 0)
+            if (in.hit - HIT_ROW == sel_i)
+                activate = true;
+            else
+            {
+                sel_i = in.hit - HIT_ROW;
+                dirty = true;
+            }
+        }
+        if (activate && total > 0)
+        {
+            if (!root && sel_i == 0)
                 go_up = true;
             else
-                enter = names[sel - (root ? 0 : 1)];
+                enter = names[sel_i - (root ? 0 : 1)];
         }
         if ((k & KEY_L) && !root)
             go_up = true;
 
-        if (k & KEY_Y)
+        if ((k & KEY_Y) || in.hit == HIT_BTN + 1)
         {
             char nm[64] = "";
-            if (ui_text_input("Naam nieuwe map", NULL, nm, sizeof(nm)))
+            if (app_text_input("Naam van de nieuwe map", "bv. spellen", nm, sizeof(nm), false))
             {
                 sanitize_filename(nm);
                 if (nm[0])
                 {
                     char np[300];
-                    snprintf(np, sizeof(np), "%s%s%s", cur, root ? (cur[strlen(cur) - 1] == '/' ? "" : "/") : "/", nm);
+                    path_join(np, sizeof(np), cur, nm);
                     mkdir(np, 0777);
-                    snprintf(cur, sizeof(cur), "%s", np); // go into the new folder
+                    snprintf(cur, sizeof(cur), "%s", np);
                 }
             }
-            go_up = false;
-            enter = NULL;
-            for (int i = 0; i < n; i++) free(names[i]);
+            for (int i = 0; i < n; i++)
+                free(names[i]);
             n = list_dirs(cur, names, PICK_MAX);
-            sel = scroll = 0;
+            sel_i = scr = 0;
             dirty = true;
             continue;
         }
@@ -838,19 +656,20 @@ static bool folder_picker(char *dir, size_t dirlen)
                 if (slash)
                 {
                     *slash = '\0';
-                    if (!strchr(cur, '/')) // back at "sd:"
+                    if (!strchr(cur, '/'))
                         snprintf(cur, sizeof(cur), "%s", drive);
                 }
             }
             else
             {
                 char np[300];
-                snprintf(np, sizeof(np), "%s%s%s", cur, root ? (cur[strlen(cur) - 1] == '/' ? "" : "/") : "/", enter);
+                path_join(np, sizeof(np), cur, enter);
                 snprintf(cur, sizeof(cur), "%s", np);
             }
-            for (int i = 0; i < n; i++) free(names[i]);
+            for (int i = 0; i < n; i++)
+                free(names[i]);
             n = list_dirs(cur, names, PICK_MAX);
-            sel = scroll = 0;
+            sel_i = scr = 0;
             dirty = true;
         }
     }
@@ -859,13 +678,7 @@ static bool folder_picker(char *dir, size_t dirlen)
         free(names[i]);
 
     if (chosen)
-    {
-        // Normalise: "sd:" or "sd:/" -> "sd:/" ; strip trailing slash otherwise
-        if (is_drive_root(cur))
-            snprintf(dir, dirlen, "%s", drive);
-        else
-            snprintf(dir, dirlen, "%s", cur);
-    }
+        snprintf(dir, dirlen, "%s", is_drive_root(cur) ? drive : cur);
     return chosen;
 }
 
@@ -876,8 +689,13 @@ static bool ensure_wifi(void)
 {
     if (wifi_ok)
         return true;
-    if (confirm("Geen wifi", "Er is geen wifi-verbinding.\n\nWifi-netwerken openen om een netwerk te kiezen?"))
-        return wifi_manager();
+    if (app_confirm("Geen wifi", "Er is geen wifi-verbinding. Wil je een netwerk kiezen?",
+                    "Wifi openen", "Nee"))
+    {
+        bool ok = wifi_manager();
+        draw_browser();
+        return ok;
+    }
     return false;
 }
 
@@ -885,18 +703,16 @@ static void refresh_catalog(void)
 {
     if (!ensure_wifi())
         return;
-    int r = run_job_ui(JOB_CATALOG, "Lijst ophalen");
+    int r = run_job_ui(JOB_CATALOG, "Lijst ophalen", "Universal-DB");
     if (r != 200)
     {
-        message("Lijst ophalen mislukt", job_err);
+        app_message("Lijst ophalen mislukt", job_err);
         return;
     }
-    consoleSelect(&bottom);
-    consoleClear();
-    printf("Lijst verwerken...\n");
-    cothread_yield_irq(IRQ_VBLANK);
+    app_status("Even geduld", "De lijst wordt verwerkt...");
     if (!load_catalog_file())
-        message("Fout", "De lijst kon niet gelezen worden.");
+        app_message("Fout", "De lijst kon niet gelezen worden.");
+    build_rows();
 }
 
 static void download_selected(void)
@@ -914,60 +730,44 @@ static void download_selected(void)
     char sz[16];
     format_size(d->size, sz, sizeof(sz));
 
-    // Confirm screen: A = download, Y = choose another folder, B = cancel
     while (1)
     {
-        snprintf(job_path, sizeof(job_path), "%s%s%s", save_dir,
-                 save_dir[strlen(save_dir) - 1] == ':' ? "/" : "/", name);
+        snprintf(job_path, sizeof(job_path), "%s/%s", is_drive_root(save_dir) ? drive : save_dir, name);
         bool exists = file_exists(job_path);
 
-        consoleSelect(&bottom);
-        consoleClear();
-        color(33, 1);
-        printf("%.32s\n\n", e->title);
-        reset_color();
-        printf("Bestand: %.23s\n", name);
-        printf("Grootte: %s\n\n", sz);
-        printf("Opslaan in:\n");
-        color(36, 1);
-        printf("%.64s\n", save_dir);
-        reset_color();
-        if (exists)
-            printf("\nBestaat al, wordt vervangen.\n");
-        printf("\x1b[19;0H");
-        printf("A downloaden\n");
-        printf("Y andere map kiezen\n");
-        printf("B annuleren\n");
-
-        u32 k;
-        do
+        char text[400];
+        snprintf(text, sizeof(text), "%s (%s)\nOpslaan in: %s%s%s", name, sz, save_dir,
+                 is_drive_root(save_dir) ? "/" : "",
+                 exists ? "\nBestaat al en wordt vervangen." : "");
+        static const char *labels[] = { "Annuleren", "Andere map", "Downloaden" };
+        static const char *keys[] = { "B", "Y", "A" };
+        draw_browser();
+        int ch = app_dialog(e->title, text, labels, keys, 3, 2);
+        if (ch == 0 || ch < 0)
         {
-            cothread_yield_irq(IRQ_VBLANK);
-            scanKeys();
-            k = keysDown();
-        } while (!(k & (KEY_A | KEY_B | KEY_Y)));
-
-        if (k & KEY_B)
+            draw_browser();
             return;
-        if (k & KEY_Y)
+        }
+        if (ch == 1)
         {
             if (folder_picker(save_dir, sizeof(save_dir)))
-                write_settings(); // remember the choice for next time
+                write_settings();
             continue;
         }
         break;
     }
     mkdir_p(save_dir);
 
-    int r = run_job_ui(JOB_DOWNLOAD, e->title);
+    int r = run_job_ui(JOB_DOWNLOAD, e->title, name);
+    draw_browser();
     if (r == 200)
     {
-        snprintf(job_msg, sizeof(job_msg), "Opgeslagen als\n%s\n\nJe vindt hem in je loader (bv. TWiLight Menu++).", job_path);
-        message("Klaar!", job_msg);
+        snprintf(job_msg, sizeof(job_msg), "Opgeslagen als %s\n\nJe vindt hem in je loader, bijvoorbeeld TWiLight Menu++.", job_path);
+        app_message("Klaar!", job_msg);
     }
     else
     {
-        message("Download mislukt", job_err);
+        app_message("Download mislukt", job_err);
     }
 }
 
@@ -979,23 +779,34 @@ static void run_server(void)
     u32 ip = Wifi_GetIP();
     snprintf(srv.ip, sizeof(srv.ip), "%lu.%lu.%lu.%lu", ip & 0xFF, (ip >> 8) & 0xFF,
              (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
-    snprintf(srv.last_msg, sizeof(srv.last_msg), " ");
+    char url[40];
+    snprintf(url, sizeof(url), "http://%s", srv.ip);
 
+    ui_server_top(url);
     start_job(JOB_SERVER);
     rate_reset();
     int frame = 0;
     while (job_running)
     {
-        g_frames++;
-        if ((frame++ % 15) == 0)
-            draw_server();
-        cothread_yield_irq(IRQ_VBLANK);
-        scanKeys();
-        if (keysDown() & KEY_B)
+        if ((frame++ % 10) == 0)
+        {
+            bool busy = srv.receiving || srv.sending;
+            if (busy)
+                rate_update(srv.done);
+            else
+                rate_reset();
+            ui_server_bottom(url, busy, srv.sending ? "Naar telefoon" : "Ontvangen", srv.current,
+                             srv.done, srv.total, rate.speed, rate_eta(srv.done, srv.total),
+                             srv.last_msg, srv.files_ok);
+            gfx_present();
+        }
+        app_wait_frame();
+        input_t in = app_input();
+        if ((in.down & KEY_B) || in.hit == HIT_BTN)
             srv.stop = true;
     }
     if (job_result != 200)
-        message("Server-fout", job_err);
+        app_message("Server-fout", job_err);
 }
 
 static void self_update(void)
@@ -1003,173 +814,136 @@ static void self_update(void)
     if (!ensure_wifi())
         return;
     remote_version[0] = '\0';
-    int r = run_job_ui(JOB_UPDATE_CHECK, "Zoeken naar update");
+    int r = run_job_ui(JOB_UPDATE_CHECK, "Zoeken naar update", "GitHub");
     if (r != 200 || !remote_version[0])
     {
-        message("Update", job_err[0] ? job_err : "Kon versie niet ophalen.");
+        app_message("Update", job_err[0] ? job_err : "Kon de versie niet ophalen.");
         return;
     }
     if (version_compare(remote_version, APP_VERSION) <= 0)
     {
         snprintf(job_msg, sizeof(job_msg), "Je hebt al de nieuwste versie (%s).", APP_VERSION);
-        message("Update", job_msg);
+        app_message("Helemaal bij", job_msg);
         return;
     }
-    snprintf(job_msg, sizeof(job_msg), "Nieuwe versie %s gevonden (je hebt %s).\n\nInstalleren in:\n%s",
-             remote_version, APP_VERSION, self_path);
-    if (!confirm("Update", job_msg))
+    snprintf(job_msg, sizeof(job_msg), "Versie %s is beschikbaar (je hebt %s). Nu installeren?",
+             remote_version, APP_VERSION);
+    if (!app_confirm("Nieuwe versie", job_msg, "Installeren", "Later"))
         return;
 
-    r = run_job_ui(JOB_UPDATE_INSTALL, "Update installeren");
+    r = run_job_ui(JOB_UPDATE_INSTALL, "Update installeren", "dsidl.nds");
     if (r == 200)
     {
-        message("Update klaar", "DSiDL is bijgewerkt. Hij sluit nu af; start hem opnieuw vanuit je loader.");
+        app_message("Update klaar", "DSiDL is bijgewerkt. Hij sluit nu af; start hem opnieuw vanuit je loader.");
         exit(0);
     }
-    message("Update mislukt", job_err);
-}
-
-// Text input with the on-screen keyboard. Returns false if cancelled.
-bool ui_text_input(const char *title, const char *hint, char *buf, size_t size)
-{
-    keyboardShow();
-    int len = strlen(buf);
-    bool masked = false;
-    bool ok = false;
-    bool dirty = true;
-
-    while (1)
-    {
-        if (dirty)
-        {
-            consoleSelect(&bottom);
-            consoleClear();
-            color(33, 1);
-            printf("%.32s\n", title);
-            reset_color();
-            printf("> ");
-            for (int i = 0; i < len; i++)
-                printf("%c", masked ? '*' : buf[i]);
-            printf("_\n\n");
-            if (hint)
-                printf("%.64s\n", hint);
-            printf("ENTER/A: ok   B: annuleer");
-            dirty = false;
-        }
-
-        cothread_yield_irq(IRQ_VBLANK);
-        scanKeys();
-        int c = keyboardUpdate();
-        u32 k = keysDown();
-
-        if (c == '\n' || (k & KEY_A))
-        {
-            ok = true;
-            break;
-        }
-        if (k & KEY_B)
-            break;
-        if (k & KEY_START)
-        {
-            masked = !masked;
-            dirty = true;
-        }
-        if (c == '\b')
-        {
-            if (len > 0)
-                buf[--len] = '\0';
-            dirty = true;
-        }
-        else if (c >= 32 && c < 127 && len < (int)size - 1)
-        {
-            buf[len++] = c;
-            buf[len] = '\0';
-            dirty = true;
-        }
-    }
-    keyboardHide();
-    return ok;
+    app_message("Update mislukt", job_err);
 }
 
 static void do_search(void)
 {
     char buf[32];
     snprintf(buf, sizeof(buf), "%s", search);
-    if (ui_text_input("Zoeken", NULL, buf, sizeof(buf)))
+    if (app_text_input("Zoeken", "titel, maker of omschrijving", buf, sizeof(buf), false))
         snprintf(search, sizeof(search), "%s", buf);
     rebuild_view();
+    build_rows();
 }
 
 static void menu(void)
 {
-    static const char *items[] = {
-        "Telefoon: bestanden beheren",
-        "Wifi-netwerken",
-        "Lijst vernieuwen",
-        "DSiDL updaten",
-        "Over DSiDL",
-        "Terug",
+    static const ui_tile_t tiles[] = {
+        { "Telefoon", 0, RGB(38, 190, 110) },
+        { "Wifi", 1, RGB(18, 158, 230) },
+        { "Lijst", 2, RGB(255, 140, 48) },
+        { "Updaten", 3, RGB(140, 100, 242) },
+        { "Over", 4, RGB(120, 132, 150) },
+        { "Terug", 5, RGB(238, 72, 82) },
+    };
+    static const char *titles[] = {
+        "Telefoon", "Wifi-netwerken", "Lijst vernieuwen", "DSiDL updaten", "Over DSiDL", "Terug"
+    };
+    static const char *texts[] = {
+        "Bekijk, upload, verplaats en kopieer bestanden op je SD-kaart vanuit de browser op je telefoon.",
+        "Zoek netwerken, kies er een en typ het wachtwoord. DSiDL onthoudt ze op je SD-kaart.",
+        "Haal de nieuwste lijst met homebrew op uit Universal-DB.",
+        "Kijk op GitHub of er een nieuwe versie van DSiDL is en installeer hem.",
+        "Versie, instellingen en waar DSiDL zijn bestanden bewaart.",
+        "Terug naar de lijst.",
     };
     const int n = 6;
     int cur = 0;
+    bool dirty = true;
 
     while (1)
     {
-        consoleSelect(&bottom);
-        consoleClear();
-        color(33, 1);
-        printf("Menu\n\n");
-        reset_color();
-        for (int i = 0; i < n; i++)
+        if (dirty)
         {
-            if (i == cur)
-            {
-                color(32, 1);
-                printf("> %s\n", items[i]);
-                reset_color();
-            }
-            else
-            {
-                printf("  %s\n", items[i]);
-            }
+            bool c;
+            int bars;
+            const char *ssid;
+            app_wifi_info(&c, &bars, &ssid);
+            ui_menu(tiles, n, cur, titles[cur], texts[cur], c, bars, ssid);
+            gfx_present();
+            dirty = false;
         }
-        printf("\x1b[20;0HOpslaan in:\n%.32s", save_dir);
+        app_wait_frame();
+        input_t in = app_input();
+        u32 k = in.down;
+        int act = -1;
 
-        u32 k;
-        do
-        {
-            cothread_yield_irq(IRQ_VBLANK);
-            scanKeys();
-            k = keysDown();
-        } while (!(k & (KEY_UP | KEY_DOWN | KEY_A | KEY_B | KEY_X)));
-
-        if (k & KEY_UP)
-            cur = (cur + n - 1) % n;
-        if (k & KEY_DOWN)
-            cur = (cur + 1) % n;
+        if (k & KEY_RIGHT) { cur = (cur + 1) % n; dirty = true; }
+        if (k & KEY_LEFT) { cur = (cur + n - 1) % n; dirty = true; }
+        if (k & KEY_DOWN) { cur = (cur + 3) % n; dirty = true; }
+        if (k & KEY_UP) { cur = (cur + n - 3) % n; dirty = true; }
         if (k & (KEY_B | KEY_X))
             return;
         if (k & KEY_A)
+            act = cur;
+        if (in.hit >= HIT_TILE && in.hit < HIT_TILE + n)
         {
-            switch (cur)
-            {
-                case 0: run_server(); break;
-                case 1: wifi_manager(); break;
-                case 2: refresh_catalog(); return;
-                case 3: self_update(); break;
-                case 4:
-                    snprintf(job_msg, sizeof(job_msg),
-                             "DSiDL %s\n\nHomebrew uit Universal-DB.\n\nInstellingen:\n%s\n\nProgramma:\n%s",
-                             APP_VERSION, SETTINGS_FILE, self_path);
-                    message("Over", job_msg);
-                    break;
-                default: return;
-            }
+            cur = in.hit - HIT_TILE;
+            act = cur;
+        }
+        if (act < 0)
+            continue;
+
+        dirty = true;
+        switch (act)
+        {
+            case 0: run_server(); break;
+            case 1: wifi_manager(); break;
+            case 2: refresh_catalog(); return;
+            case 3: self_update(); break;
+            case 4:
+                snprintf(job_msg, sizeof(job_msg),
+                         "DSiDL %s - homebrew uit Universal-DB.\nOpslaan in: %s\nInstellingen: %s\nProgramma: %s",
+                         APP_VERSION, save_dir, SETTINGS_FILE, self_path);
+                app_message("Over DSiDL", job_msg);
+                break;
+            default: return;
         }
     }
 }
 
 // ---------------------------------------------------------------------------
+// Startup splash
+
+static const char *splash_lines[8];
+static int splash_n;
+static int splash_frame;
+
+static void splash(const char *line)
+{
+    if (splash_n == 8)
+    {
+        memmove(splash_lines, splash_lines + 1, sizeof(splash_lines[0]) * 7);
+        splash_n--;
+    }
+    splash_lines[splash_n++] = line;
+    ui_splash(splash_lines, splash_n, splash_frame += 8);
+    gfx_present();
+}
 
 static void find_self_path(int argc, char **argv)
 {
@@ -1190,32 +964,27 @@ static void find_self_path(int argc, char **argv)
     snprintf(self_path, sizeof(self_path), "%s/roms/nds/dsidl.nds", drive);
 }
 
+static char wifi_line[64];
+
+static void wifi_status(const char *text)
+{
+    snprintf(wifi_line, sizeof(wifi_line), "%s", text);
+    splash(wifi_line);
+}
+
 int main(int argc, char **argv)
 {
     defaultExceptionHandler();
+    gfx_init();
 
-    videoSetMode(MODE_0_2D);
-    videoSetModeSub(MODE_0_2D);
-    vramSetBankA(VRAM_A_MAIN_BG);
-    vramSetBankC(VRAM_C_SUB_BG);
-
-    consoleInit(&top, 0, BgType_Text4bpp, BgSize_T_256x256, 31, 0, true, true);
-    consoleInit(&bottom, 0, BgType_Text4bpp, BgSize_T_256x256, 22, 3, false, true);
-    kbd = keyboardDemoInit();
-    keyboardHide();
-
-    consoleSelect(&top);
-    color(31, 1);
-    printf("DSiDL " APP_VERSION "\n\n");
-    reset_color();
+    splash("Opstarten...");
 
     if (!fatInitDefault())
     {
-        printf("SD-kaart niet gevonden!\n");
+        splash("SD-kaart niet gevonden!");
         while (1)
             swiWaitForVBlank();
     }
-    // Prefer the drive we were started from
     if (argc > 0 && argv[0] && strncmp(argv[0], "fat:", 4) == 0)
         strcpy(drive, "fat:");
     else
@@ -1236,14 +1005,12 @@ int main(int argc, char **argv)
     load_settings();
     save_default_settings();
 
-    printf("Certificaten laden...\n");
-    cothread_yield_irq(IRQ_VBLANK);
+    splash("Certificaten laden");
     bool tls = http_init();
     if (!tls)
-        printf("Let op: HTTPS niet beschikbaar\n");
+        splash("Let op: HTTPS niet beschikbaar");
 
-    printf("Wifi starten (%s)\n", isDSiMode() ? "DSi-modus, WPA2 ok" : "DS-modus, alleen WEP/open");
-    cothread_yield_irq(IRQ_VBLANK);
+    splash(isDSiMode() ? "Wifi starten (DSi-modus)" : "Wifi starten (DS-modus)");
     scanKeys();
     snprintf(WIFI_FILE, sizeof(WIFI_FILE), "%s/wifi.txt", DATA_DIR);
 #ifdef SKIP_WIFI
@@ -1251,66 +1018,126 @@ int main(int argc, char **argv)
 #else
     bool autoconnect = !(keysHeld() & KEY_B);
 #endif
+    wifi_set_status_callback(wifi_status);
     if (!autoconnect)
-        printf("B ingedrukt: niet automatisch verbinden.\n");
+        splash("Niet automatisch verbinden");
     if (wifi_start(WIFI_FILE, autoconnect))
-        printf("Verbonden met %s\n", wifi_ssid()[0] ? wifi_ssid() : "wifi");
+        splash("Verbonden!");
     else if (autoconnect)
-        printf("Geen verbinding. Kies een netwerk\nvia X > Wifi-netwerken.\n");
+        splash("Geen verbinding");
+    wifi_set_status_callback(NULL);
 
-    printf("Lijst laden...\n");
-    cothread_yield_irq(IRQ_VBLANK);
+    splash("Lijst laden");
     bool have = load_catalog_file();
+    build_rows();
     if (wifi_ok && tls && (!have || catalog_is_old()))
         refresh_catalog();
 
     bool dirty = true;
-    int repeat = 0;
+    int repeat = 0, drag = 0;
 
     while (1)
     {
         if (dirty)
         {
-            draw_list();
-            draw_details();
+            draw_browser();
             dirty = false;
         }
 
-        cothread_yield_irq(IRQ_VBLANK);
-        scanKeys();
-        u32 down = keysDown();
-        u32 held = keysHeld();
+        app_wait_frame();
+        input_t in = app_input();
+        u32 down = in.down;
 
-        // Key repeat for scrolling
         u32 nav = down;
-        if (held & (KEY_UP | KEY_DOWN))
+        if (in.held & (KEY_UP | KEY_DOWN))
         {
             if (++repeat > 20 && (repeat % 4) == 0)
-                nav |= held & (KEY_UP | KEY_DOWN);
+                nav |= in.held & (KEY_UP | KEY_DOWN);
         }
         else
-        {
             repeat = 0;
-        }
 
         if (view_count > 0)
         {
             if (nav & KEY_DOWN) { sel = (sel + 1) % view_count; dl_choice = 0; dirty = true; }
             if (nav & KEY_UP) { sel = (sel + view_count - 1) % view_count; dl_choice = 0; dirty = true; }
-            if (down & KEY_RIGHT) { sel += LIST_ROWS; if (sel >= view_count) sel = view_count - 1; dl_choice = 0; dirty = true; }
-            if (down & KEY_LEFT) { sel -= LIST_ROWS; if (sel < 0) sel = 0; dl_choice = 0; dirty = true; }
+            if (down & KEY_RIGHT) { sel += BROWSER_ROWS; if (sel >= view_count) sel = view_count - 1; dl_choice = 0; dirty = true; }
+            if (down & KEY_LEFT) { sel -= BROWSER_ROWS; if (sel < 0) sel = 0; dl_choice = 0; dirty = true; }
 
             cat_entry_t *e = &cat.entries[view[sel]];
             if ((down & KEY_R) && e->num_dl > 1) { dl_choice = (dl_choice + 1) % e->num_dl; dirty = true; }
             if ((down & KEY_L) && e->num_dl > 1) { dl_choice = (dl_choice + e->num_dl - 1) % e->num_dl; dirty = true; }
+
+            // Drag to scroll the list
+            if (in.drag_dy)
+            {
+                drag += in.drag_dy;
+                while (drag <= -30 && scroll + BROWSER_ROWS < view_count)
+                {
+                    scroll++;
+                    drag += 30;
+                    if (sel < scroll) sel = scroll;
+                    dirty = true;
+                }
+                while (drag >= 30 && scroll > 0)
+                {
+                    scroll--;
+                    drag -= 30;
+                    if (sel >= scroll + BROWSER_ROWS) sel = scroll + BROWSER_ROWS - 1;
+                    dirty = true;
+                }
+            }
+        }
+        if (!in.touching)
+            drag = 0;
+
+        bool tap_download = false;
+        if (in.hit >= HIT_ROW && in.hit < HIT_ROW + 1000 && in.hit - HIT_ROW < view_count)
+        {
+            int idx = in.hit - HIT_ROW;
+            if (idx == sel)
+                tap_download = true;
+            else
+            {
+                sel = idx;
+                dl_choice = 0;
+                dirty = true;
+            }
+        }
+        if (in.hit >= HIT_TAB && in.hit < HIT_TAB + NUM_CATS)
+        {
+            category = in.hit - HIT_TAB;
+            rebuild_view();
+            build_rows();
+            dirty = true;
         }
 
-        if (down & KEY_A) { download_selected(); dirty = true; }
-        if (down & KEY_Y) { do_search(); dirty = true; }
-        if (down & KEY_B) { search[0] = '\0'; rebuild_view(); dirty = true; }
-        if (down & KEY_SELECT) { category = (category + 1) % NUM_CATS; rebuild_view(); dirty = true; }
-        if (down & KEY_X) { menu(); dirty = true; }
-        if (down & KEY_START) break;
+        if ((down & KEY_A) || tap_download) { download_selected(); dirty = true; }
+        if ((down & KEY_Y) || in.hit == HIT_SEARCH) { do_search(); dirty = true; }
+        if (down & KEY_B)
+        {
+            if (search[0])
+            {
+                search[0] = '\0';
+                rebuild_view();
+                build_rows();
+            }
+            dirty = true;
+        }
+        if (down & KEY_SELECT)
+        {
+            category = (category + 1) % NUM_CATS;
+            rebuild_view();
+            build_rows();
+            dirty = true;
+        }
+        if ((down & KEY_X) || in.hit == HIT_MENU) { menu(); dirty = true; }
+        if (down & KEY_START)
+        {
+            if (app_confirm("Afsluiten", "DSiDL afsluiten?", "Afsluiten", "Nee"))
+                break;
+            dirty = true;
+        }
     }
 
     Wifi_DisconnectAP();

@@ -15,8 +15,9 @@ bool wifi_manager(void);
 
 bool wifi_connected(void);
 const char *wifi_ssid(void);   // name of the current network ("" if unknown)
+int wifi_bars(void);           // signal of the current network, 0..4
 
-// Provided by main.c
-bool ui_text_input(const char *title, const char *hint, char *buf, size_t len);
+// Progress text while connecting (used by the start-up screen)
+void wifi_set_status_callback(void (*cb)(const char *text));
 
 #endif
