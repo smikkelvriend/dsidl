@@ -39,6 +39,7 @@ size_t ppmd7v_ram_limit = 0; /* 0 = no limit (for tests) */
 size_t ppmd7v_reserve = 1u << 20; /* RAM to leave free in paged mode */
 unsigned long ppmd7v_faults;
 void (*ppmd7v_yield)(void) = NULL;
+volatile int ppmd7v_abort = 0;
 static unsigned yield_count;
 
 /* Creates the swap file at full size so seeks never have to extend it, and
@@ -1013,7 +1014,7 @@ static void Update2(CPpmd7v *p)
 int Ppmd7v_DecodeSymbol(CPpmd7v *p, IPpmd7_RangeDec *rc)
 {
   size_t charMask[256 / sizeof(size_t)];
-  if (p->io_error)
+  if (p->io_error || ppmd7v_abort)
     return -2;
   if (ppmd7v_yield && (++yield_count & 2047) == 0)
     ppmd7v_yield();

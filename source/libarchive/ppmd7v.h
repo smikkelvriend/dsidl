@@ -42,6 +42,7 @@ extern size_t ppmd7v_ram_limit;
 extern size_t ppmd7v_reserve;
 extern unsigned long ppmd7v_faults;
 extern void (*ppmd7v_yield)(void);
+extern volatile int ppmd7v_abort;
 
 void Ppmd7v_Construct(CPpmd7v *p);
 Bool Ppmd7v_Alloc(CPpmd7v *p, UInt32 size);

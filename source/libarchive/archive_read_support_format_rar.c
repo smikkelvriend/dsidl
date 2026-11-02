@@ -331,6 +331,10 @@ struct rar
   unsigned int unp_buffer_size;
   unsigned char *unp_buffer;
   unsigned int dictionary_size;
+  unsigned int ppmd_mem; /* DSiDL: PPMd model size, separate from the window */
+  int64_t wbase;          /* DSiDL: window position where this file starts */
+  char tables_read;       /* DSiDL: unrar's TablesRead3 */
+  char solid_ready;       /* DSiDL: previous file fully decoded */
   char entry_eof;
   unsigned long crc_calculated;
   int found_first_header;
@@ -1132,7 +1136,7 @@ archive_read_format_rar_read_data(struct archive_read *a, const void **buff,
   case COMPRESS_METHOD_GOOD:
   case COMPRESS_METHOD_BEST:
     ret = read_data_compressed(a, buff, size, offset, 0);
-    if (ret != ARCHIVE_OK && ret != ARCHIVE_WARN) {
+    if (ret != ARCHIVE_OK && ret != ARCHIVE_WARN && ret != ARCHIVE_EOF) {
       Ppmd7v_Free(&rar->ppmd7_context);
       rar->start_new_table = 1;
       rar->ppmd_valid = 0;
@@ -1430,10 +1434,11 @@ read_header(struct archive_read *a, struct archive_entry *entry,
     rar->arctime = 0;
     rar->arcnsec = 0;
   }
-  else
+  else if (!rar->solid_ready)
   {
+    /* DSiDL: a solid file can only be decoded right after the previous one */
     archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
-                      "RAR solid archive support unavailable");
+                      "RAR solid archive: previous file was not decoded");
     return (ARCHIVE_FATAL);
   }
 
@@ -1809,9 +1814,8 @@ read_header(struct archive_read *a, struct archive_entry *entry,
   }
 
   rar->bytes_uncopied = rar->bytes_unconsumed = 0;
-  rar->lzss.position = rar->offset = 0;
+  rar->offset = 0;
   rar->offset_seek = 0;
-  rar->dictionary_size = 0;
   rar->offset_outgoing = 0;
   rar->br.cache_avail = 0;
   rar->br.avail_in = 0;
@@ -1819,16 +1823,48 @@ read_header(struct archive_read *a, struct archive_entry *entry,
   rar->crc_calculated = 0;
   rar->entry_eof = 0;
   rar->valid = 1;
-  rar->is_ppmd_block = 0;
-  rar->start_new_table = 1;
   free(rar->unp_buffer);
   rar->unp_buffer = NULL;
   rar->unp_offset = 0;
   rar->unp_buffer_size = UNP_BUFFER_SIZE;
-  memset(rar->lengthtable, 0, sizeof(rar->lengthtable));
-  Ppmd7v_Free(&rar->ppmd7_context);
-  rar->ppmd_valid = rar->ppmd_eod = 0;
+  /* Pending filters never carry over to the next file */
+  delete_filter(rar->filters.stack);
+  rar->filters.stack = NULL;
   rar->filters.filterstart = INT64_MAX;
+  rar->filters.lastend = 0;
+  rar->ppmd_eod = 0;
+  if ((rar->mode & AE_IFMT) == AE_IFDIR || rar->unp_size == 0)
+  {
+    /* DSiDL: nothing to decode; leave the (solid) decoder state alone */
+    rar->wbase = rar->lzss.position;
+  }
+  else if ((rar->file_flags & FHD_SOLID) && rar->solid_ready)
+  {
+    /* DSiDL: solid file - keep window, tables, PPMd model and filter
+     * programs, like unrar's Unpack29(Solid=true). */
+    rar->wbase = rar->lzss.position;
+    rar->start_new_table = !rar->tables_read;
+  }
+  else
+  {
+    rar->lzss.position = 0;
+    rar->wbase = 0;
+    rar->dictionary_size = 0;
+    rar->is_ppmd_block = 0;
+    rar->start_new_table = 1;
+    rar->tables_read = 0;
+    memset(rar->lengthtable, 0, sizeof(rar->lengthtable));
+    Ppmd7v_Free(&rar->ppmd7_context);
+    rar->ppmd_valid = 0;
+    rar->ppmd_escape = 2;
+    rar->lastlength = rar->lastoffset = 0;
+    memset(rar->oldoffset, 0, sizeof(rar->oldoffset));
+    delete_program_code(rar->filters.progs);
+    rar->filters.progs = NULL;
+    rar->filters.lastfilternum = 0;
+  }
+  if (!((rar->mode & AE_IFMT) == AE_IFDIR || rar->unp_size == 0))
+    rar->solid_ready = 0; /* set again when this file decodes to its end */
 
   archive_entry_set_mtime(entry, rar->mtime, rar->mnsec);
   archive_entry_set_ctime(entry, rar->ctime, rar->cnsec);
@@ -2058,7 +2094,7 @@ read_data_compressed(struct archive_read *a, const void **buff, size_t *size,
   struct rar *rar = a->format->data;
   int64_t start, end;
   size_t bs;
-  int ret = (ARCHIVE_OK), sym, code, lzss_offset, length, i;
+  int ret = (ARCHIVE_OK);
 
   do {
     if (!rar->valid)
@@ -2090,7 +2126,7 @@ read_data_compressed(struct archive_read *a, const void **buff, size_t *size,
       goto ending_block;
     }
 
-    if (rar->ppmd_eod ||
+    if ((rar->ppmd_eod && rar->bytes_uncopied == 0) ||
        (rar->dictionary_size && rar->offset >= rar->unp_size))
     {
       if (rar->unp_offset > 0) {
@@ -2118,16 +2154,17 @@ read_data_compressed(struct archive_read *a, const void **buff, size_t *size,
 #endif
       }
       rar->entry_eof = 1;
+      rar->solid_ready = 1;
       return (ARCHIVE_EOF);
     }
 
-    if (!rar->is_ppmd_block && rar->dictionary_size && rar->bytes_uncopied > 0)
+    if (rar->dictionary_size && rar->bytes_uncopied > 0)
     {
       if (rar->bytes_uncopied > (rar->unp_buffer_size - rar->unp_offset))
         bs = rar->unp_buffer_size - rar->unp_offset;
       else
         bs = (size_t)rar->bytes_uncopied;
-      ret = copy_from_lzss_window_to_unp(a, buff, rar->offset, bs);
+      ret = copy_from_lzss_window_to_unp(a, buff, rar->offset + rar->wbase, bs);
       if (ret != ARCHIVE_OK)
         return (ret);
       rar->offset += bs;
@@ -2158,85 +2195,8 @@ read_data_compressed(struct archive_read *a, const void **buff, size_t *size,
     if (rar->start_new_table && ((ret = parse_codes(a)) < (ARCHIVE_WARN)))
       return (ret);
 
-    if (rar->is_ppmd_block)
     {
-      if ((sym = Ppmd7v_DecodeSymbol(&rar->ppmd7_context, &rar->range_dec.p)) < 0)
-      {
-        archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
-                          "Invalid symbol");
-        return (ARCHIVE_FAILED);
-      }
-      if(sym != rar->ppmd_escape)
-      {
-        lzss_emit_literal(rar, sym);
-        rar->bytes_uncopied++;
-      }
-      else
-      {
-        if ((code = Ppmd7v_DecodeSymbol(&rar->ppmd7_context, &rar->range_dec.p)) < 0)
-        {
-          archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
-                            "Invalid symbol");
-          return (ARCHIVE_FAILED);
-        }
-
-        switch(code)
-        {
-          case 0:
-            rar->start_new_table = 1;
-            return read_data_compressed(a, buff, size, offset, looper);
-
-          case 2:
-            rar->ppmd_eod = 1;/* End Of ppmd Data. */
-            continue;
-
-          case 3:
-            archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
-                              "Parsing filters is unsupported");
-            return (ARCHIVE_FAILED);
-
-          case 4:
-            lzss_offset = 0;
-            for (i = 2; i >= 0; i--)
-            {
-              if ((code = Ppmd7v_DecodeSymbol(&rar->ppmd7_context, &rar->range_dec.p)) < 0)
-              {
-                archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
-                                  "Invalid symbol");
-                return (ARCHIVE_FAILED);
-              }
-              lzss_offset |= code << (i * 8);
-            }
-            if ((length = Ppmd7v_DecodeSymbol(&rar->ppmd7_context, &rar->range_dec.p)) < 0)
-            {
-              archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
-                                "Invalid symbol");
-              return (ARCHIVE_FAILED);
-            }
-            lzss_emit_match(rar, lzss_offset + 2, length + 32);
-            rar->bytes_uncopied += length + 32;
-            break;
-
-          case 5:
-            if ((length = Ppmd7v_DecodeSymbol(&rar->ppmd7_context, &rar->range_dec.p)) < 0)
-            {
-              archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
-                                "Invalid symbol");
-              return (ARCHIVE_FAILED);
-            }
-            lzss_emit_match(rar, 1, length + 4);
-            rar->bytes_uncopied += length + 4;
-            break;
-
-         default:
-           lzss_emit_literal(rar, sym);
-           rar->bytes_uncopied++;
-        }
-      }
-    }
-    else
-    {
-      start = rar->offset;
+      start = rar->offset + rar->wbase;
       end = start + rar->dictionary_size;
 
       /* We don't want to overflow the window and overwrite data that we write
@@ -2247,9 +2207,12 @@ read_data_compressed(struct archive_read *a, const void **buff, size_t *size,
        * value, however that will only be the case when 'unp_size' is small,
        * which should only happen when the entry size is small and there's no
        * risk of overflowing the buffer */
-      if (rar->dictionary_size > 260) {
-        end -= 260;
+      if (rar->dictionary_size > 300) {
+        end -= 300; /* DSiDL: PPMd matches can be up to 287 bytes */
       }
+      /* DSiDL: decode in smaller steps so progress/cancel stay responsive */
+      if (end > start + 256 * 1024)
+        end = start + 256 * 1024;
 
       if (rar->filters.filterstart < end) {
         end = rar->filters.filterstart;
@@ -2261,7 +2224,8 @@ read_data_compressed(struct archive_read *a, const void **buff, size_t *size,
 
       rar->bytes_uncopied = end - start;
       rar->filters.lastend = end;
-      if (rar->filters.lastend != rar->filters.filterstart && rar->bytes_uncopied == 0) {
+      if (rar->filters.lastend != rar->filters.filterstart && rar->bytes_uncopied == 0 &&
+          !rar->ppmd_eod && !rar->start_new_table) {
           /* Broken RAR files cause this case.
           * NOTE: If this case were possible on a normal RAR file
           * we would find out where it was actually bad and
@@ -2275,7 +2239,7 @@ read_data_compressed(struct archive_read *a, const void **buff, size_t *size,
       bs = rar->unp_buffer_size - rar->unp_offset;
     else
       bs = (size_t)rar->bytes_uncopied;
-    ret = copy_from_lzss_window_to_unp(a, buff, rar->offset, bs);
+    ret = copy_from_lzss_window_to_unp(a, buff, rar->offset + rar->wbase, bs);
     if (ret != ARCHIVE_OK)
       return (ret);
     rar->offset += bs;
@@ -2327,7 +2291,7 @@ parse_codes(struct archive_read *a)
     {
       if (!rar_br_read_ahead(a, br, 8))
         goto truncated_data;
-      rar->dictionary_size = (rar_br_bits(br, 8) + 1) << 20;
+      rar->ppmd_mem = (rar_br_bits(br, 8) + 1) << 20;
       rar_br_consume(br, 8);
     }
 
@@ -2335,11 +2299,11 @@ parse_codes(struct archive_read *a)
     {
       if (!rar_br_read_ahead(a, br, 8))
         goto truncated_data;
-      rar->ppmd_escape = rar->ppmd7_context.InitEsc = rar_br_bits(br, 8);
+      rar->ppmd_escape = rar_br_bits(br, 8); /* DSiDL: not the model's InitEsc */
       rar_br_consume(br, 8);
     }
-    else
-      rar->ppmd_escape = 2;
+    /* DSiDL: like unrar, the escape char is kept when the flag is absent
+     * (it starts at 2 for every non-solid file). */
 
     if (ppmd_flags & 0x20)
     {
@@ -2364,22 +2328,23 @@ parse_codes(struct archive_read *a)
       rar->range_dec.Stream = &rar->bytein;
       Ppmd7v_Construct(&rar->ppmd7_context);
 
-      if (rar->dictionary_size == 0) {
+      if (rar->ppmd_mem == 0) {
         archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
                           "Invalid zero dictionary size");
         return (ARCHIVE_FAILED);
       }
 
       /* DSiDL: keep RAM for the LZSS window that is allocated after this */
-      ppmd7v_reserve = (1u << 20) + ((rar->unp_size >= DICTIONARY_MAX_SIZE) ?
+      ppmd7v_reserve = (1u << 20) + ((rar->unp_size >= DICTIONARY_MAX_SIZE ||
+          (rar->main_flags & MHD_SOLID)) ?
           DICTIONARY_MAX_SIZE : (rar_fls((unsigned int)rar->unp_size) << 1));
       if (rar->lzss.window)
         ppmd7v_reserve = 1u << 20;
       if (!Ppmd7v_Alloc(&rar->ppmd7_context,
-        rar->dictionary_size))
+        rar->ppmd_mem))
       {
         archive_set_error(&a->archive, ENOMEM,
-                          "PPMd needs %u MB", rar->dictionary_size >> 20);
+                          "PPMd needs %u MB", rar->ppmd_mem >> 20);
         return (ARCHIVE_FATAL);
       }
       if (!__archive_ppmd7_functions.PpmdRAR_RangeDec_Init(&rar->range_dec))
@@ -2557,7 +2522,7 @@ parse_codes(struct archive_read *a)
     void *new_window;
     unsigned int new_size;
 
-    if (rar->unp_size >= DICTIONARY_MAX_SIZE)
+    if (rar->unp_size >= DICTIONARY_MAX_SIZE || (rar->main_flags & MHD_SOLID))
       new_size = DICTIONARY_MAX_SIZE;
     else
       new_size = rar_fls((unsigned int)rar->unp_size) << 1;
@@ -2578,6 +2543,8 @@ parse_codes(struct archive_read *a)
     rar->lzss.mask = rar->dictionary_size - 1;
   }
 
+  if (!rar->is_ppmd_block)
+    rar->tables_read = 1;
   rar->start_new_table = 0;
   return (ARCHIVE_OK);
 truncated_data:
@@ -2920,6 +2887,130 @@ make_table_recurse(struct archive_read *a, struct huffman_code *code, int node,
   return ret;
 }
 
+/* Decodes one PPMd item. Returns 1 to continue, 0 when expand() must stop
+ * (end of PPMd data or a new LZ table at the end of the file), -1 on error. */
+static int
+ppmd_sym(struct archive_read *a, int *out)
+{
+  struct rar *rar = a->format->data;
+  int sym = Ppmd7v_DecodeSymbol(&rar->ppmd7_context, &rar->range_dec.p);
+  if (sym < 0)
+  {
+    archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT, "Invalid symbol");
+    return 0;
+  }
+  *out = sym;
+  return 1;
+}
+
+static int
+expand_ppmd(struct archive_read *a, int64_t *end)
+{
+  struct rar *rar = a->format->data;
+  int sym, code, length, i;
+  int lzss_offset;
+
+  if (rar->ppmd_eod)
+  {
+    *end = lzss_position(&rar->lzss);
+    return 0;
+  }
+  if (!ppmd_sym(a, &sym))
+    return -1;
+  if (sym != rar->ppmd_escape)
+  {
+    lzss_emit_literal(rar, (uint8_t)sym);
+    return 1;
+  }
+  if (!ppmd_sym(a, &code))
+    return -1;
+  switch (code)
+  {
+    case 0:
+      /* New table (LZ or PPMd) */
+      if (parse_codes(a) != ARCHIVE_OK)
+        return -1;
+      if (rar->filters.filterstart < *end)
+        *end = rar->filters.filterstart;
+      return 1;
+
+    case 2:
+      rar->ppmd_eod = 1;
+      *end = lzss_position(&rar->lzss);
+      return 0;
+
+    case 3:
+    {
+      /* Filter (VM code) inside PPMd data, as in unrar's ReadVMCodePPM */
+      uint8_t flags, *vmcode;
+      uint16_t len;
+      int v;
+      if (!ppmd_sym(a, &v))
+        return -1;
+      flags = (uint8_t)v;
+      len = (flags & 7) + 1;
+      if (len == 7)
+      {
+        if (!ppmd_sym(a, &v))
+          return -1;
+        len = (uint16_t)(v + 7);
+      }
+      else if (len == 8)
+      {
+        int v2;
+        if (!ppmd_sym(a, &v) || !ppmd_sym(a, &v2))
+          return -1;
+        len = (uint16_t)(v * 256 + v2);
+      }
+      vmcode = malloc(len ? len : 1);
+      if (!vmcode)
+        return -1;
+      for (i = 0; i < len; i++)
+      {
+        if (!ppmd_sym(a, &v))
+        {
+          free(vmcode);
+          return -1;
+        }
+        vmcode[i] = (uint8_t)v;
+      }
+      if (!parse_filter(a, vmcode, len, flags))
+      {
+        free(vmcode);
+        archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT, "Bad RAR filter");
+        return -1;
+      }
+      free(vmcode);
+      if (rar->filters.filterstart < *end)
+        *end = rar->filters.filterstart;
+      return 1;
+    }
+
+    case 4:
+      lzss_offset = 0;
+      for (i = 2; i >= 0; i--)
+      {
+        if (!ppmd_sym(a, &code))
+          return -1;
+        lzss_offset |= code << (i * 8);
+      }
+      if (!ppmd_sym(a, &length))
+        return -1;
+      lzss_emit_match(rar, lzss_offset + 2, length + 32);
+      return 1;
+
+    case 5:
+      if (!ppmd_sym(a, &length))
+        return -1;
+      lzss_emit_match(rar, 1, length + 4);
+      return 1;
+
+    default:
+      lzss_emit_literal(rar, (uint8_t)sym);
+      return 1;
+  }
+}
+
 static int
 expand(struct archive_read *a, int64_t *end)
 {
@@ -2978,8 +3069,12 @@ expand(struct archive_read *a, int64_t *end)
     }
 
     if(rar->is_ppmd_block) {
-      *end = lzss_position(&rar->lzss);
-      return (ARCHIVE_OK);
+      /* DSiDL: PPMd data is decoded here as well, so that filters and
+       * switches between PPMd and LZ blocks work like in unrar. */
+      int r = expand_ppmd(a, end);
+      if (r != 1)
+        return (r == 0 ? ARCHIVE_OK : ARCHIVE_FATAL);
+      continue;
     }
 
     if ((symbol = read_next_symbol(a, &rar->maincode)) < 0)
@@ -3002,12 +3097,14 @@ expand(struct archive_read *a, int64_t *end)
         if (!rar_br_read_ahead(a, br, 1))
           goto truncated_data;
         rar->start_new_table = rar_br_bits(br, 1);
+        rar->tables_read = !rar->start_new_table;
         rar_br_consume(br, 1);
         *end = lzss_position(&rar->lzss);
         return (ARCHIVE_OK);
       }
       else
       {
+        rar->tables_read = 0; /* like unrar's ReadEndOfBlock */
         if (parse_codes(a) != ARCHIVE_OK)
           goto bad_data;
         continue;

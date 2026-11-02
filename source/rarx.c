@@ -20,7 +20,21 @@
 extern char ppmd7v_swap_path[300];
 extern size_t ppmd7v_ram_limit;
 extern void (*ppmd7v_yield)(void);
-static void rar_yield(void) { cothread_yield(); }
+extern volatile int ppmd7v_abort;
+static struct archive *cur_a;
+static http_progress_t *cur_prog;
+// Called regularly from inside the (slow) PPMd decoder
+static void rar_yield(void)
+{
+    if (cur_prog)
+    {
+        if (cur_a)
+            cur_prog->done = (size_t)archive_filter_bytes(cur_a, -1);
+        if (cur_prog->cancel)
+            ppmd7v_abort = 1;
+    }
+    cothread_yield();
+}
 #include "util.h"
 
 extern size_t rar5_window_cap;
@@ -143,6 +157,9 @@ bool rar_extract_all(const char *rar, const char *dest, http_progress_t *prog,
     snprintf(hist_path, sizeof(hist_path), "%s/.dsidl_rar.tmp", dest);
     snprintf(ppmd7v_swap_path, sizeof(ppmd7v_swap_path), "%s/.dsidl_ppmd.tmp", dest);
     ppmd7v_yield = rar_yield;
+    ppmd7v_abort = 0;
+    cur_a = a;
+    cur_prog = prog;
     hist_f = NULL;
     hist_wpos = -1;
     hist_dirty = false;
@@ -256,7 +273,9 @@ bool rar_extract_all(const char *rar, const char *dest, http_progress_t *prog,
         cur_out = NULL;
         if (r != ARCHIVE_EOF)
         {
-            if (!err[0])
+            if (!err[0] && ppmd7v_abort)
+                snprintf(err, errlen, "Gestopt");
+            else if (!err[0])
                 set_rar_err(a, err, errlen);
             remove(tmp);
             ok = false;
@@ -285,6 +304,8 @@ bool rar_extract_all(const char *rar, const char *dest, http_progress_t *prog,
     rar5_far_read = NULL;
     rar5_hist_write = NULL;
     ppmd7v_yield = NULL;
+    cur_a = NULL;
+    cur_prog = NULL;
     if (files_out)
         *files_out = files;
     if (ok && files == 0)
