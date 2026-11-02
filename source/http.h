@@ -15,6 +15,10 @@ typedef struct {
     char status[64];
 } http_progress_t;
 
+// Extra cancel flag checked by all requests (e.g. a job's own Cancel button
+// while it makes several downloads with their own progress structs).
+void http_set_cancel_flag(volatile bool *flag);
+
 // Load the built-in CA certificates. Call once at startup.
 bool http_init(void);
 

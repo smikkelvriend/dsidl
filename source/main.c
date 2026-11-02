@@ -256,6 +256,9 @@ static int boxart_run(void)
     nds_free(&installed);
     nds_scan(&installed, drive, 1000);
 
+    // Cancel in the UI must also stop the cover downloads below
+    http_set_cancel_flag(&prog.cancel);
+
     // Collect game codes (skip homebrew without a real code)
     int n = installed.count;
     prog.counts = true;
@@ -275,7 +278,8 @@ static int boxart_run(void)
             box_skip++;
             continue;
         }
-        snprintf(prog.status, sizeof(prog.status), "%.40s", f->title);
+        if (!prog.cancel)
+            snprintf(prog.status, sizeof(prog.status), "%.40s", f->title);
 
         char regs[16];
         snprintf(regs, sizeof(regs), "%s", box_regions(f->code[3]));
@@ -316,7 +320,10 @@ static int boxart_run(void)
         if (got)
             box_ok++;
     }
+    http_set_cancel_flag(NULL);
     prog.done = n;
+    if (prog.cancel)
+        snprintf(job_err, sizeof(job_err), "Gestopt");
     return 200;
 }
 

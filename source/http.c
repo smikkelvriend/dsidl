@@ -9,6 +9,7 @@
 #include <dswifi9.h>
 #include <netdb.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <netinet/in.h>
 
 #include <mbedtls/ctr_drbg.h>
@@ -89,9 +90,16 @@ typedef struct {
     mbedtls_ssl_context ssl;
 } conn_t;
 
+static volatile bool *g_cancel2 = NULL;
+
+void http_set_cancel_flag(volatile bool *flag)
+{
+    g_cancel2 = flag;
+}
+
 static bool cancelled(void)
 {
-    return g_cancel && *g_cancel;
+    return (g_cancel && *g_cancel) || (g_cancel2 && *g_cancel2);
 }
 
 // Waits until fd is readable (or writable). Returns 1 ready, 0 timeout or
@@ -175,16 +183,37 @@ static int tcp_connect(const char *host, int port, char *err, size_t errlen)
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fd < 0)
             continue;
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0)
+        // Non-blocking connect with a time limit: a blocking connect() can
+        // wait forever when a server doesn't answer (and ignore Cancel).
+        int nb = 1;
+        ioctl(fd, FIONBIO, &nb);
+        int r = connect(fd, ai->ai_addr, ai->ai_addrlen);
+        bool ok = r == 0;
+        if (!ok && (errno == EINPROGRESS || errno == EWOULDBLOCK || errno == EAGAIN || errno == EALREADY))
+        {
+            ok = wait_fd(fd, true, 12000) == 1;
+            if (ok)
+            {
+                int soerr = 0;
+                socklen_t sl = sizeof(soerr);
+                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl) != 0 || soerr != 0)
+                    ok = false;
+            }
+        }
+        nb = 0;
+        ioctl(fd, FIONBIO, &nb);
+        if (ok)
             break;
         closesocket(fd);
         fd = -1;
+        if (cancelled())
+            break;
     }
     freeaddrinfo(res);
 
     if (fd < 0)
     {
-        snprintf(err, errlen, "Kan niet verbinden met %s", host);
+        snprintf(err, errlen, cancelled() ? "Geannuleerd" : "Kan niet verbinden met %s", host);
         return -1;
     }
     return fd;
