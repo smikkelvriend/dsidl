@@ -17,6 +17,10 @@
 #include "libarchive/archive.h"
 #include "libarchive/archive_entry.h"
 #include "rarx.h"
+extern char ppmd7v_swap_path[300];
+extern size_t ppmd7v_ram_limit;
+extern void (*ppmd7v_yield)(void);
+static void rar_yield(void) { cothread_yield(); }
 #include "util.h"
 
 extern size_t rar5_window_cap;
@@ -137,6 +141,8 @@ bool rar_extract_all(const char *rar, const char *dest, http_progress_t *prog,
     rar5_far_read = rar_far_read;
     rar5_hist_write = rar_hist_write;
     snprintf(hist_path, sizeof(hist_path), "%s/.dsidl_rar.tmp", dest);
+    snprintf(ppmd7v_swap_path, sizeof(ppmd7v_swap_path), "%s/.dsidl_ppmd.tmp", dest);
+    ppmd7v_yield = rar_yield;
     hist_f = NULL;
     hist_wpos = -1;
     hist_dirty = false;
@@ -278,6 +284,7 @@ bool rar_extract_all(const char *rar, const char *dest, http_progress_t *prog,
     }
     rar5_far_read = NULL;
     rar5_hist_write = NULL;
+    ppmd7v_yield = NULL;
     if (files_out)
         *files_out = files;
     if (ok && files == 0)
