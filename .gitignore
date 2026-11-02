@@ -1,0 +1,7 @@
+build/
+mbedtls-src
+mbedtls-nds/
+*.nds
+*.elf
+*.map
+version.txt
