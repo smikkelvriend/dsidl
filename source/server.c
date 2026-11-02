@@ -15,6 +15,7 @@
 
 #include "server.h"
 #include "util.h"
+#include <stdint.h>
 
 extern char drive[8];
 
@@ -447,12 +448,27 @@ static void api_download(int fd, server_state_t *st, const char *query)
         if (*c == '"' || (unsigned char)*c < 32)
             *c = '_';
 
+    char inl[4] = "0";
+    query_param(query, "inline", inl, sizeof(inl));
+    const char *ctype = "application/octet-stream";
+    const char *dot = strrchr(safe, '.');
+    if (dot && (!strcasecmp(dot, ".jpg") || !strcasecmp(dot, ".jpeg")))
+        ctype = "image/jpeg";
+    else if (dot && !strcasecmp(dot, ".png"))
+        ctype = "image/png";
+    else if (dot && !strcasecmp(dot, ".bmp"))
+        ctype = "image/bmp";
+    else if (dot && !strcasecmp(dot, ".gif"))
+        ctype = "image/gif";
+
     char hdr[400];
     int n = snprintf(hdr, sizeof(hdr),
-                     "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
+                     "HTTP/1.1 200 OK\r\nContent-Type: %s\r\n"
                      "Content-Length: %lu\r\n"
-                     "Content-Disposition: attachment; filename=\"%s\"\r\n"
-                     "Connection: close\r\n\r\n", (unsigned long)stt.st_size, safe);
+                     "Content-Disposition: %s; filename=\"%s\"\r\n"
+                     "Cache-Control: max-age=3600\r\n"
+                     "Connection: close\r\n\r\n", inl[0] == '1' ? ctype : "application/octet-stream",
+                     (unsigned long)stt.st_size, inl[0] == '1' ? "inline" : "attachment", safe);
     if (!send_all(fd, hdr, n))
     {
         fclose(f);
@@ -664,6 +680,286 @@ static void api_copy_move(int fd, server_state_t *st, bool move, const char *que
     reply_text(fd, 200, "OK");
 }
 
+// ---------------------------------------------------------------------------
+// Storage info, photo list, inline files and zip downloads
+
+static void api_info(int fd)
+{
+    unsigned long long fr = 0, tot = 0;
+    disk_space(drive, &fr, &tot);
+    char b[96];
+    snprintf(b, sizeof(b), "{\"free\":%llu,\"total\":%llu}", fr, tot);
+    reply(fd, 200, "application/json", b, strlen(b));
+}
+
+static bool is_image(const char *n)
+{
+    const char *d = strrchr(n, '.');
+    return d && (!strcasecmp(d, ".jpg") || !strcasecmp(d, ".jpeg") || !strcasecmp(d, ".png") ||
+                 !strcasecmp(d, ".bmp") || !strcasecmp(d, ".gif"));
+}
+
+static void photo_walk(sbuf_t *b, const char *full, const char *web, int depth, bool *first, int *n)
+{
+    if (depth > 4 || *n > 2000)
+        return;
+    DIR *d = opendir(full);
+    if (!d)
+        return;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL)
+    {
+        if (de->d_name[0] == '.')
+            continue;
+        char f2[400], w2[400];
+        snprintf(f2, sizeof(f2), "%s/%s", full, de->d_name);
+        snprintf(w2, sizeof(w2), "%s/%s", web, de->d_name);
+        if (de->d_type == DT_DIR)
+        {
+            photo_walk(b, f2, w2, depth + 1, first, n);
+            continue;
+        }
+        if (!is_image(de->d_name))
+            continue;
+        struct stat st;
+        unsigned long sz = stat(f2, &st) == 0 ? (unsigned long)st.st_size : 0;
+        if (!*first)
+            sb_str(b, ",");
+        *first = false;
+        sb_str(b, "{\"p\":");
+        sb_json_str(b, w2);
+        char num[32];
+        snprintf(num, sizeof(num), ",\"s\":%lu}", sz);
+        sb_str(b, num);
+        if ((++*n & 15) == 0)
+            cothread_yield();
+    }
+    closedir(d);
+}
+
+static void api_photos(int fd)
+{
+    sbuf_t b = { 0 };
+    sb_str(&b, "[");
+    bool first = true;
+    int n = 0;
+    // DSi camera photos, plus the "photo" folder some tools use
+    static const char *roots[] = { "/DCIM", "/photo", "/screenshots", NULL };
+    for (int i = 0; roots[i]; i++)
+    {
+        char full[64];
+        snprintf(full, sizeof(full), "%s%s", drive, roots[i]);
+        photo_walk(&b, full, roots[i], 0, &first, &n);
+    }
+    sb_str(&b, "]");
+    if (!b.p)
+        reply_text(fd, 500, "Geen geheugen");
+    else
+        reply(fd, 200, "application/json; charset=utf-8", b.p, b.len);
+    free(b.p);
+}
+
+static uint32_t zcrc_table[256];
+
+static uint32_t zcrc(uint32_t crc, const uint8_t *p, size_t n)
+{
+    if (!zcrc_table[1])
+        for (uint32_t i = 0; i < 256; i++)
+        {
+            uint32_t c = i;
+            for (int k = 0; k < 8; k++)
+                c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            zcrc_table[i] = c;
+        }
+    crc = ~crc;
+    while (n--)
+        crc = zcrc_table[(crc ^ *p++) & 0xFF] ^ (crc >> 8);
+    return ~crc;
+}
+
+typedef struct {
+    char *name;
+    uint32_t crc, size, off;
+} zent_t;
+
+typedef struct {
+    int fd;
+    zent_t *e;
+    int n, cap;
+    uint32_t off;
+    bool ok;
+    server_state_t *st;
+    char *buf;
+} zip_t;
+
+static void put16(uint8_t *p, uint16_t v) { p[0] = v; p[1] = v >> 8; }
+static void put32(uint8_t *p, uint32_t v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24; }
+
+static bool zsend(zip_t *z, const void *d, size_t n)
+{
+    if (!z->ok)
+        return false;
+    if (!send_all(z->fd, d, n))
+        z->ok = false;
+    z->off += n;
+    return z->ok;
+}
+
+static void zip_file(zip_t *z, const char *full, const char *name)
+{
+    FILE *f = fopen(full, "rb");
+    if (!f)
+        return;
+    if (z->n == z->cap)
+    {
+        z->cap = z->cap ? z->cap * 2 : 64;
+        zent_t *nw = realloc(z->e, sizeof(zent_t) * z->cap);
+        if (!nw)
+        {
+            fclose(f);
+            z->ok = false;
+            return;
+        }
+        z->e = nw;
+    }
+    zent_t *e = &z->e[z->n++];
+    e->name = strdup(name);
+    e->off = z->off;
+    e->crc = 0;
+    e->size = 0;
+    size_t nl = strlen(name);
+
+    uint8_t h[30] = { 0 };
+    put32(h, 0x04034b50);
+    put16(h + 4, 20);
+    put16(h + 6, 0x0808); // data descriptor + UTF-8 names
+    put16(h + 26, nl);
+    zsend(z, h, 30);
+    zsend(z, name, nl);
+
+    struct stat st;
+    snprintf(z->st->current, sizeof(z->st->current), "%s", name);
+    z->st->total = stat(full, &st) == 0 ? st.st_size : 0;
+    z->st->done = 0;
+    while (z->ok && !z->st->stop)
+    {
+        size_t r = fread(z->buf, 1, 16 * 1024, f);
+        if (r == 0)
+            break;
+        e->crc = zcrc(e->crc, (uint8_t *)z->buf, r);
+        e->size += r;
+        zsend(z, z->buf, r);
+        z->st->done += r;
+        cothread_yield();
+    }
+    fclose(f);
+    if (z->st->stop)
+        z->ok = false;
+
+    uint8_t dd[16];
+    put32(dd, 0x08074b50);
+    put32(dd + 4, e->crc);
+    put32(dd + 8, e->size);
+    put32(dd + 12, e->size);
+    zsend(z, dd, 16);
+}
+
+static void zip_walk(zip_t *z, const char *full, const char *rel, int depth)
+{
+    if (depth > 12 || !z->ok)
+        return;
+    DIR *d = opendir(full);
+    if (!d)
+        return;
+    struct dirent *de;
+    while (z->ok && (de = readdir(d)) != NULL)
+    {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
+            continue;
+        char *f2 = malloc(600), *r2 = malloc(600);
+        if (!f2 || !r2)
+        {
+            free(f2);
+            free(r2);
+            z->ok = false;
+            break;
+        }
+        snprintf(f2, 600, "%s/%s", full, de->d_name);
+        snprintf(r2, 600, "%s%s%s", rel, rel[0] ? "/" : "", de->d_name);
+        if (de->d_type == DT_DIR)
+            zip_walk(z, f2, r2, depth + 1);
+        else
+            zip_file(z, f2, r2);
+        free(f2);
+        free(r2);
+    }
+    closedir(d);
+}
+
+static void api_zip(int fd, server_state_t *st, const char *query)
+{
+    char full[300], clean[256];
+    if (!resolve(query, "path", full, sizeof(full), clean, sizeof(clean)))
+    {
+        reply_text(fd, 400, "Ongeldig pad");
+        return;
+    }
+    if (strcmp(clean, "/") == 0)
+        snprintf(full, sizeof(full), "%s", drive);
+    const char *base = strrchr(clean, '/');
+    base = (base && base[1]) ? base + 1 : "sd-kaart";
+
+    char hdr[300];
+    int n = snprintf(hdr, sizeof(hdr),
+                     "HTTP/1.0 200 OK\r\nContent-Type: application/zip\r\n"
+                     "Content-Disposition: attachment; filename=\"%s.zip\"\r\n"
+                     "Connection: close\r\n\r\n", base);
+    if (!send_all(fd, hdr, n))
+        return;
+
+    zip_t z = { fd, NULL, 0, 0, 0, true, st, malloc(16 * 1024) };
+    if (!z.buf)
+        return;
+    st->sending = true;
+    // Entries are stored inside a folder named like the one downloaded
+    zip_walk(&z, full, base, 0);
+
+    // Central directory
+    uint32_t cd_start = z.off;
+    for (int i = 0; i < z.n && z.ok; i++)
+    {
+        zent_t *e = &z.e[i];
+        size_t nl = strlen(e->name);
+        uint8_t c[46] = { 0 };
+        put32(c, 0x02014b50);
+        put16(c + 4, 20);
+        put16(c + 6, 20);
+        put16(c + 8, 0x0808);
+        put32(c + 16, e->crc);
+        put32(c + 20, e->size);
+        put32(c + 24, e->size);
+        put16(c + 28, nl);
+        put32(c + 42, e->off);
+        zsend(&z, c, 46);
+        zsend(&z, e->name, nl);
+    }
+    uint8_t eocd[22] = { 0 };
+    put32(eocd, 0x06054b50);
+    put16(eocd + 8, z.n);
+    put16(eocd + 10, z.n);
+    put32(eocd + 12, z.off - cd_start);
+    put32(eocd + 16, cd_start);
+    zsend(&z, eocd, 22);
+
+    for (int i = 0; i < z.n; i++)
+        free(z.e[i].name);
+    free(z.e);
+    free(z.buf);
+    st->sending = false;
+    if (z.ok)
+        snprintf(st->last_msg, sizeof(st->last_msg), "Zip verstuurd: %.60s", base);
+}
+
 static void api_action(int fd, server_state_t *st, const char *target, const char *query)
 {
     char full[300], clean[256];
@@ -813,6 +1109,18 @@ static void handle_client(int fd, server_state_t *st, const char *default_dir)
     else if (strcmp(method, "GET") == 0 && strcmp(target, "/dl") == 0)
     {
         api_download(fd, st, query ? query : "");
+    }
+    else if (strcmp(method, "GET") == 0 && strcmp(target, "/zip") == 0)
+    {
+        api_zip(fd, st, query ? query : "");
+    }
+    else if (strcmp(method, "GET") == 0 && strcmp(target, "/api/info") == 0)
+    {
+        api_info(fd);
+    }
+    else if (strcmp(method, "GET") == 0 && strcmp(target, "/api/photos") == 0)
+    {
+        api_photos(fd);
     }
     else if (strcmp(method, "POST") == 0 && strncmp(target, "/api/", 5) == 0)
     {

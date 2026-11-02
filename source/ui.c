@@ -3,6 +3,7 @@
 // Original design: light, rounded, friendly. All shapes and icons are drawn
 // in code; the font is Poppins (SIL Open Font License).
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,59 @@
 #include "gfx.h"
 #include "qrcodegen.h"
 #include "ui.h"
+
+// ---------------------------------------------------------------------------
+// Theme
+
+theme_t theme;
+static color_t *bg_cache;
+
+const char *const ui_accent_names[UI_ACCENTS] = { "Blauw", "Rood", "Groen", "Paars", "Oranje", "Roze" };
+static const uint8_t accents[UI_ACCENTS][3] = {
+    { 18, 158, 230 }, { 226, 52, 64 }, { 30, 176, 104 }, { 128, 92, 236 }, { 248, 128, 32 }, { 236, 72, 150 },
+};
+
+void ui_set_theme(bool dark, int accent)
+{
+    if (accent < 0 || accent >= UI_ACCENTS)
+        accent = 0;
+    const uint8_t *a = accents[accent];
+    theme.dark = dark;
+    theme.accent = RGB(a[0], a[1], a[2]);
+    theme.accent2 = RGB(a[0] * 3 / 4, a[1] * 3 / 4, a[2] * 3 / 4);
+    if (dark)
+    {
+        theme.bg1 = RGB(30, 34, 42);
+        theme.bg2 = RGB(16, 18, 24);
+        theme.stripe = RGB(44, 50, 62);
+        theme.card = RGB(40, 45, 56);
+        theme.surface = RGB(50, 56, 69);
+        theme.surface2 = RGB(33, 37, 46);
+        theme.line = RGB(64, 71, 86);
+        theme.text = RGB(236, 240, 246);
+        theme.dim = RGB(160, 170, 186);
+        theme.faint = RGB(104, 114, 130);
+        theme.accent_l = gfx_mix(theme.card, theme.accent, 70);
+        theme.accent2 = RGB(a[0] / 2 + 120, a[1] / 2 + 120, a[2] / 2 + 120);
+    }
+    else
+    {
+        theme.bg1 = RGB(246, 248, 252);
+        theme.bg2 = RGB(226, 233, 243);
+        theme.stripe = RGB(255, 255, 255);
+        theme.card = RGB(255, 255, 255);
+        theme.surface = RGB(255, 255, 255);
+        theme.surface2 = RGB(241, 244, 249);
+        theme.line = RGB(222, 228, 237);
+        theme.text = RGB(40, 48, 61);
+        theme.dim = RGB(123, 135, 152);
+        theme.faint = RGB(178, 188, 202);
+        theme.accent_l = gfx_mix(RGB(255, 255, 255), theme.accent, 34);
+    }
+    // Force the background to be rebuilt in the new colors
+    free(bg_cache);
+    bg_cache = NULL;
+}
 
 // ---------------------------------------------------------------------------
 // Hit regions
@@ -65,8 +119,6 @@ color_t ui_category_color(const char *c)
     return RGB(136, 149, 167);
 }
 
-static color_t *bg_cache;
-
 void ui_background(surface_t *s)
 {
     gfx_noclip(s);
@@ -82,7 +134,7 @@ void ui_background(surface_t *s)
             for (int k = 0; k < 6 && x + k < SCR_W; k++)
             {
                 color_t *p = &s->px[y * SCR_W + x + k];
-                *p = gfx_mix(*p, C_WHITE, 70);
+                *p = gfx_mix(*p, theme.stripe, 70);
             }
     bg_cache = malloc(SCR_W * SCR_H * 2);
     if (bg_cache)
@@ -106,7 +158,7 @@ void ui_key_glyph(surface_t *s, int x, int y, const char *key, color_t bg)
 
 void ui_topbar(surface_t *s, bool wifi, int bars, const char *ssid)
 {
-    gfx_fill(s, 0, 0, SCR_W, 18, C_WHITE);
+    gfx_fill(s, 0, 0, SCR_W, 18, C_SURFACE);
     gfx_blend(s, 0, 18, SCR_W, 1, RGB(0, 30, 70), 40);
     gfx_blend(s, 0, 19, SCR_W, 1, RGB(0, 30, 70), 16);
 
@@ -142,7 +194,7 @@ void ui_topbar(surface_t *s, bool wifi, int bars, const char *ssid)
 void ui_button(surface_t *s, int id, int x, int y, int w, int h, const char *key,
                const char *label, bool primary)
 {
-    color_t bg = primary ? C_ACCENT : C_WHITE;
+    color_t bg = primary ? C_ACCENT : C_SURFACE;
     color_t fg = primary ? C_WHITE : C_TEXT;
     gfx_rrect_blend(s, x, y + 1, w, h, h / 2, RGB(0, 30, 70), 40);
     gfx_rrect(s, x, y, w, h, h / 2, bg);
@@ -182,7 +234,7 @@ void ui_progress(surface_t *s, int x, int y, int w, int h, int permille, color_t
         permille = 0;
     if (permille > 1000)
         permille = 1000;
-    gfx_rrect(s, x, y, w, h, h / 2, RGB(229, 235, 243));
+    gfx_rrect(s, x, y, w, h, h / 2, C_SURFACE2);
     int fw = w * permille / 1000;
     if (fw > 0)
     {
@@ -202,8 +254,8 @@ int ui_chip_w(const char *text)
 void ui_chip(surface_t *s, int x, int y, const char *text, color_t c)
 {
     int w = ui_chip_w(text);
-    gfx_rrect(s, x, y, w, 14, 7, gfx_mix(C_WHITE, c, 46));
-    gfx_text(s, x + 6, y + 1, text, FONT_SMALL, gfx_mix(c, C_BLACK, 40));
+    gfx_rrect(s, x, y, w, 14, 7, gfx_mix(C_CARD, c, theme.dark ? 70 : 46));
+    gfx_text(s, x + 6, y + 1, text, FONT_SMALL, theme.dark ? gfx_mix(c, C_WHITE, 120) : gfx_mix(c, C_BLACK, 40));
 }
 
 void ui_spinner(surface_t *s, int cx, int cy, int r, int frame)
@@ -353,6 +405,25 @@ void icon_moon(surface_t *s, int x, int y, int sz, color_t c, color_t bg)
     gfx_circle(s, x + sz / 5, y + sz / 5, 1, c);
 }
 
+static void icon_picture(surface_t *s, int x, int y, int sz, color_t c)
+{
+    gfx_rrect_line(s, x + 1, y + 3, sz - 2, sz - 6, 3, 2, c);
+    gfx_circle(s, x + sz / 3, y + sz / 3 + 1, sz / 10 + 1, c);
+    for (int i = 0; i < sz / 3; i++)
+        gfx_fill(s, x + sz / 2 - i, y + sz / 2 + i - 1, i * 2 + 1, 1, c);
+}
+
+static void icon_gear(surface_t *s, int x, int y, int sz, color_t c, color_t bg)
+{
+    int cx = x + sz / 2, cy = y + sz / 2, r = sz / 2 - 3;
+    static const signed char dx[8] = { 0, 7, 10, 7, 0, -7, -10, -7 };
+    static const signed char dy[8] = { -10, -7, 0, 7, 10, 7, 0, -7 };
+    for (int i = 0; i < 8; i++)
+        gfx_circle(s, cx + dx[i] * (r + 1) / 10, cy + dy[i] * (r + 1) / 10, sz / 9 + 1, c);
+    gfx_circle(s, cx, cy, r, c);
+    gfx_circle(s, cx, cy, r / 2, bg);
+}
+
 static color_t icon_bg = 0;
 
 static void draw_icon(surface_t *s, int kind, int x, int y, int sz, color_t c)
@@ -360,6 +431,21 @@ static void draw_icon(surface_t *s, int kind, int x, int y, int sz, color_t c)
     if (kind == 6)
     {
         icon_moon(s, x, y, sz, c, icon_bg);
+        return;
+    }
+    if (kind == 7)
+    {
+        icon_picture(s, x, y, sz, c);
+        return;
+    }
+    if (kind == 8)
+    {
+        icon_folder(s, x, y, sz, c);
+        return;
+    }
+    if (kind == 9)
+    {
+        icon_gear(s, x, y, sz, c, icon_bg);
         return;
     }
 
@@ -423,7 +509,10 @@ void ui_browser_top(const ui_item_t *it, bool wifi, int bars, const char *ssid)
     }
 
     color_t cc = ui_category_color(it->category);
-    ui_letter_tile(s, 18, 36, 44, it->title, cc);
+    if (it->icon && it->icon->px)
+        gfx_blit_round(s, it->icon, 18, 36, 11);
+    else
+        ui_letter_tile(s, 18, 36, 44, it->title, cc);
 
     gfx_clip(s, 70, 30, 172, 60);
     int tl = gfx_text_wrap(s, 70, 34, 170, 2, 17, it->title, FONT_TITLE, C_TEXT);
@@ -454,8 +543,8 @@ void ui_browser_top(const ui_item_t *it, bool wifi, int bars, const char *ssid)
     wrap_desc(s, 18, dy, 220, lines, it->description);
 
     // File line at the bottom of the card
-    gfx_fill(s, 8, 160, 240, 24, RGB(244, 247, 251));
-    gfx_rrect(s, 8, 168, 240, 16, 8, RGB(244, 247, 251));
+    gfx_fill(s, 8, 160, 240, 24, C_SURFACE2);
+    gfx_rrect(s, 8, 168, 240, 16, 8, C_SURFACE2);
     gfx_fill(s, 8, 160, 240, 1, C_LINE);
     char size[24];
     unsigned long b = it->size;
@@ -481,12 +570,12 @@ static void draw_row(surface_t *s, int x, int y, int w, int h, const ui_row_t *r
     if (sel)
     {
         gfx_rrect(s, x - 2, y - 2, w + 4, h + 4, 9, C_ACCENT);
-        gfx_rrect(s, x, y, w, h, 7, RGB(240, 249, 255));
+        gfx_rrect(s, x, y, w, h, 7, C_ACCENT_L);
     }
     else
     {
         gfx_rrect_blend(s, x, y + 1, w, h, 7, RGB(0, 30, 70), 26);
-        gfx_rrect(s, x, y, w, h, 7, C_WHITE);
+        gfx_rrect(s, x, y, w, h, 7, C_SURFACE);
     }
 
     int ix = x + 4, iy = y + (h - 22) / 2;
@@ -497,8 +586,28 @@ static void draw_row(surface_t *s, int x, int y, int w, int h, const ui_row_t *r
     {
         gfx_rrect(s, ix, iy, 22, 22, 6, C_ACCENT_L);
         int bars = r->badge ? r->badge[0] - '0' : 0;
-        icon_wifi(s, ix + 4, iy + 6, bars, C_ACCENT, RGB(190, 215, 235));
+        icon_wifi(s, ix + 4, iy + 6, bars, C_ACCENT, C_LINE);
     }
+    else if (icon_kind == 3)
+    {
+        // file manager: folder or file by kind
+        if (r->kind == 1)
+            icon_folder(s, ix, iy, 22, RGB(255, 196, 64));
+        else
+        {
+            gfx_rrect(s, ix + 3, iy + 1, 16, 20, 3, C_SURFACE2);
+            gfx_rrect_line(s, ix + 3, iy + 1, 16, 20, 3, 1, C_LINE);
+            const char *dot = strrchr(r->title, '.');
+            char ext[5] = "";
+            if (dot)
+                for (int i = 0; i < 3 && dot[i + 1]; i++)
+                    ext[i] = (dot[i + 1] >= 'a' && dot[i + 1] <= 'z') ? dot[i + 1] - 32 : dot[i + 1];
+            color_t ec = ui_category_color(r->category);
+            gfx_text_center(s, ix + 11, iy + 6, ext, FONT_SMALL, ec);
+        }
+    }
+    else if (r->icon && r->icon->px)
+        gfx_blit_round(s, r->icon, ix, iy, 6);
     else
         ui_letter_tile(s, ix, iy, 22, r->title, ui_category_color(r->category));
 
@@ -577,7 +686,7 @@ void ui_browser_bottom(const ui_row_t *rows, int count, int sel, int scroll_px, 
     {
         int maxs = (count - BROWSER_ROWS) * step;
         int track = 4 * step - 4;
-        gfx_rrect(s, 248, top, 4, track, 2, RGB(214, 222, 233));
+        gfx_rrect(s, 248, top, 4, track, 2, C_LINE);
         int th = track * BROWSER_ROWS / count;
         if (th < 12)
             th = 12;
@@ -594,7 +703,7 @@ void ui_browser_bottom(const ui_row_t *rows, int count, int sel, int scroll_px, 
 
     // Search field + menu button
     gfx_rrect_blend(s, 6, 6, 186, 22, 11, RGB(0, 30, 70), 30);
-    gfx_rrect(s, 6, 5, 186, 22, 11, C_WHITE);
+    gfx_rrect(s, 6, 5, 186, 22, 11, C_SURFACE);
     icon_search(s, 14, 9, C_DIM);
     if (search && search[0])
         gfx_text_fit(s, 32, 9, 136, search, FONT_BODY, C_TEXT);
@@ -617,7 +726,7 @@ void ui_browser_bottom(const ui_row_t *rows, int count, int sel, int scroll_px, 
     }
 
     // Footer
-    gfx_blend(s, 0, 176, SCR_W, 16, C_WHITE, 200);
+    gfx_blend(s, 0, 176, SCR_W, 16, C_SURFACE, 200);
     gfx_fill(s, 0, 176, SCR_W, 1, C_LINE);
     int x = 8;
     ui_key_glyph(s, x, 178, "A", C_ACCENT);
@@ -665,7 +774,7 @@ void ui_dialog(const char *title, const char *text, const char *const *labels,
 
     ui_card(s, cx, y, cw, h);
     gfx_rrect(s, cx, y, cw, 6, 3, C_ACCENT);
-    gfx_fill(s, cx, y + 3, cw, 3, C_WHITE);
+    gfx_fill(s, cx, y + 3, cw, 3, C_SURFACE);
     gfx_clip(s, cx, y, cw, h);
     gfx_text_fit(s, cx + 14, y + 10, cw - 28, title, FONT_TITLE, C_TEXT);
     gfx_text_wrap(s, cx + 14, y + 32, cw - 28, 7, 14, text ? text : "", FONT_BODY, C_DIM);
@@ -709,9 +818,22 @@ static void fmt_time(long s, char *o, size_t n)
         snprintf(o, n, "%ld:%02ld", s / 60, s % 60);
 }
 
+int ui_progress_counts;
+
 static void progress_block(surface_t *s, int x, int y, int w, unsigned long done,
                            unsigned long total, unsigned long speed, long eta)
 {
+    if (ui_progress_counts)
+    {
+        int pm = total ? (int)((unsigned long long)done * 1000 / total) : 0;
+        ui_progress(s, x, y, w, 14, pm, C_ACCENT);
+        char line[48], pct[8];
+        snprintf(line, sizeof(line), "%lu van %lu", done, total);
+        snprintf(pct, sizeof(pct), "%d%%", pm / 10);
+        gfx_text(s, x, y + 22, line, FONT_BODY, C_TEXT);
+        gfx_text(s, x + w - gfx_text_w(pct, FONT_TITLE), y + 20, pct, FONT_TITLE, C_ACCENT);
+        return;
+    }
     char a[20], b[20], sp[24], t[20];
     fmt_size(done, a, sizeof(a));
     int pm = total ? (int)((unsigned long long)done * 1000 / total) : 0;
@@ -768,10 +890,9 @@ void ui_progress_screen(const char *title, const char *name, const char *status,
 
 void ui_menu_tile_pos(int i, int *x, int *y)
 {
-    const int cols = 4, tw = 56, th = 64, gx = 6, gy = 8, x0 = 9, y0 = 30;
-    (void)th;
+    const int cols = 4, tw = 56, th = 44, gx = 6, gy = 5, x0 = 9, y0 = 27;
     *x = x0 + (i % cols) * (tw + gx);
-    *y = y0 + (i / cols) * (64 + gy);
+    *y = y0 + (i / cols) * (th + gy);
 }
 
 void ui_menu(const ui_tile_t *tiles, int n, int sel, const char *top_title,
@@ -798,8 +919,8 @@ void ui_menu(const ui_tile_t *tiles, int n, int sel, const char *top_title,
     surface_t *s = &scr_bot;
     ui_hits_clear();
     ui_background(s);
-    gfx_text(s, 10, 6, "Menu", FONT_TITLE, C_TEXT);
-    const int tw = 56, th = 64;
+    gfx_text(s, 10, 4, "Menu", FONT_TITLE, C_TEXT);
+    const int tw = 56, th = 44;
 
     // Selection ring (slides between tiles)
     if (anim >= 256)
@@ -819,16 +940,16 @@ void ui_menu(const ui_tile_t *tiles, int n, int sel, const char *top_title,
         int dy = (u * u / 256) * 18 / 256;
         y += dy;
         ui_card(s, x, y, tw, th);
-        gfx_rrect(s, x + tw / 2 - 14, y + 8, 28, 28, 9, tiles[i].color);
-        gfx_rrect_blend(s, x + tw / 2 - 13, y + 9, 26, 12, 6, C_WHITE, 50);
+        gfx_rrect(s, x + tw / 2 - 11, y + 4, 22, 22, 7, tiles[i].color);
+        gfx_rrect_blend(s, x + tw / 2 - 10, y + 5, 20, 9, 5, C_WHITE, 50);
         icon_bg = tiles[i].color;
-        draw_icon(s, tiles[i].icon, x + tw / 2 - 10, y + 12, 20, C_WHITE);
+        draw_icon(s, tiles[i].icon, x + tw / 2 - 8, y + 7, 16, C_WHITE);
         gfx_clip(s, x + 1, y, tw - 2, th);
-        gfx_text_center(s, x + tw / 2, y + 42, tiles[i].label, gfx_text_w(tiles[i].label, FONT_BOLD) > tw - 4 ? FONT_SMALL : FONT_BOLD, C_TEXT);
+        gfx_text_center(s, x + tw / 2, y + 28, tiles[i].label, FONT_SMALL, C_TEXT);
         gfx_noclip(s);
         ui_hit_add(HIT_TILE + i, x, y, tw, th);
     }
-    gfx_blend(s, 0, 176, SCR_W, 16, C_WHITE, 200);
+    gfx_blend(s, 0, 176, SCR_W, 16, C_SURFACE, 200);
     gfx_fill(s, 0, 176, SCR_W, 1, C_LINE);
     ui_key_glyph(s, 8, 178, "A", C_ACCENT);
     gfx_text(s, 24, 178, "Kiezen", FONT_SMALL, C_TEXT);
@@ -858,7 +979,7 @@ void ui_server_bottom(const char *url, bool busy, const char *what, const char *
     ui_hits_clear();
     ui_background(s);
     ui_card(s, 10, 8, 236, 146);
-    gfx_rrect(s, 22, 22, 26, 26, 8, busy ? C_ACCENT_L : RGB(225, 247, 235));
+    gfx_rrect(s, 22, 22, 26, 26, 8, busy ? C_ACCENT_L : C_SURFACE2);
     icon_phone(s, 24, 24, 22, busy ? C_ACCENT : C_GREEN);
     if (busy)
     {
@@ -945,7 +1066,7 @@ void ui_list_screen(const char *header, const char *subheader, const ui_row_t *r
     {
         int maxs = (count - LIST_ROWS) * step;
         int track = LIST_ROWS * step - 3;
-        gfx_rrect(s, 248, top, 4, track, 2, RGB(214, 222, 233));
+        gfx_rrect(s, 248, top, 4, track, 2, C_LINE);
         int th = track * LIST_ROWS / count;
         if (th < 12)
             th = 12;
@@ -956,7 +1077,7 @@ void ui_list_screen(const char *header, const char *subheader, const ui_row_t *r
     // Header over the list
     if (bg_cache)
         memcpy(s->px, bg_cache, SCR_W * 29 * 2);
-    gfx_fill(s, 0, 0, SCR_W, 26, C_WHITE);
+    gfx_fill(s, 0, 0, SCR_W, 26, C_SURFACE);
     gfx_blend(s, 0, 26, SCR_W, 1, RGB(0, 30, 70), 40);
     gfx_text_fit(s, 10, 1, 236, header, FONT_BOLD, C_TEXT);
     if (subheader)
@@ -966,12 +1087,114 @@ void ui_list_screen(const char *header, const char *subheader, const ui_row_t *r
     {
         if (bg_cache)
             memcpy(s->px + 166 * SCR_W, bg_cache + 166 * SCR_W, SCR_W * 26 * 2);
-        gfx_blend(s, 0, 166, SCR_W, 26, C_WHITE, 170);
+        gfx_blend(s, 0, 166, SCR_W, 26, C_SURFACE, 170);
         int bw = (244 - (nbuttons - 1) * 4) / nbuttons;
         for (int i = 0; i < nbuttons; i++)
             ui_button(s, HIT_BTN + i, 6 + i * (bw + 4), 168, bw, 21,
                       keys ? keys[i] : NULL, labels[i], i == 0);
     }
+}
+
+void ui_details_top(const ui_item_t *it, const img_t *shot, int idx, int count, bool loading,
+                    int frame)
+{
+    surface_t *s = &scr_top;
+    ui_background(s);
+    ui_card(s, 8, 8, 240, 176);
+    if (count > 0)
+    {
+        // Screenshot area
+        gfx_rrect(s, 14, 14, 228, 150, 6, C_SURFACE2);
+        if (shot && shot->px)
+        {
+            int x = 128 - shot->w / 2, y = 89 - shot->h / 2;
+            gfx_clip(s, 14, 14, 228, 150);
+            gfx_blit(s, shot, x, y);
+            gfx_noclip(s);
+        }
+        else if (loading)
+        {
+            ui_spinner(s, 128, 80, 12, frame);
+            gfx_text_center(s, 128, 100, "Screenshot laden...", FONT_SMALL, C_DIM);
+        }
+        else
+            gfx_text_center(s, 128, 84, "Kon screenshot niet laden", FONT_SMALL, C_DIM);
+        // Dots + arrows
+        int dw = count * 10;
+        for (int i = 0; i < count; i++)
+            gfx_circle(s, 128 - dw / 2 + i * 10 + 5, 173, i == idx ? 3 : 2, i == idx ? C_ACCENT : C_FAINT);
+        if (count > 1)
+        {
+            ui_key_glyph(s, 16, 167, "L", C_FAINT);
+            ui_key_glyph(s, 227, 167, "R", C_FAINT);
+        }
+    }
+    else
+    {
+        if (it->icon && it->icon->px)
+            gfx_blit_round(s, it->icon, 106, 46, 11);
+        else
+            ui_letter_tile(s, 106, 46, 44, it->title, ui_category_color(it->category));
+        gfx_text_center(s, 128, 102, it->title, FONT_TITLE, C_TEXT);
+        gfx_text_center(s, 128, 126, "Geen screenshots beschikbaar", FONT_SMALL, C_DIM);
+    }
+}
+
+void ui_details_bottom(const ui_item_t *it, const char *dest, const char *space, bool warn)
+{
+    surface_t *s = &scr_bot;
+    ui_hits_clear();
+    ui_background(s);
+    ui_card(s, 8, 6, 240, 124);
+    if (it->icon && it->icon->px)
+        gfx_blit_round(s, it->icon, 16, 14, 11);
+    else
+        ui_letter_tile(s, 16, 14, 44, it->title, ui_category_color(it->category));
+    gfx_clip(s, 66, 10, 176, 52);
+    int tl = gfx_text_wrap(s, 66, 12, 174, 2, 16, it->title, FONT_TITLE, C_TEXT);
+    gfx_noclip(s);
+    char by[80];
+    snprintf(by, sizeof(by), "%s%s%s", it->author ? it->author : "", it->version ? "  " : "", it->version ? it->version : "");
+    gfx_text_fit(s, 66, 12 + tl * 16, 174, by, FONT_SMALL, C_DIM);
+
+    // File row (tap to switch when there are several)
+    gfx_rrect(s, 16, 64, 224, 22, 8, C_SURFACE2);
+    icon_download(s, 22, 69, 12, C_ACCENT);
+    char sz[24];
+    unsigned long b = it->size;
+    if (b >= 1048576UL)
+        snprintf(sz, sizeof(sz), "%lu.%lu MB", b / 1048576UL, (b % 1048576UL) * 10 / 1048576UL);
+    else
+        snprintf(sz, sizeof(sz), "%lu KB", b / 1024);
+    int sw = gfx_text_w(sz, FONT_SMALL);
+    int right = 234 - sw;
+    if (it->dl_count > 1)
+    {
+        char v[24];
+        snprintf(v, sizeof(v), "%d/%d", it->dl_index + 1, it->dl_count);
+        int vw = gfx_text_w(v, FONT_SMALL);
+        ui_key_glyph(s, right - vw - 28, 68, "SEL", C_FAINT);
+        gfx_text(s, right - vw - 6, 69, v, FONT_SMALL, C_ACCENT);
+        right -= vw + 34;
+        ui_hit_add(HIT_TAB, 16, 64, 224, 22);
+    }
+    gfx_text_fit(s, 38, 69, right - 42, it->file ? it->file : "", FONT_SMALL, C_TEXT);
+    gfx_text(s, 234 - sw, 69, sz, FONT_SMALL, C_DIM);
+
+    // Destination + free space
+    gfx_text(s, 16, 92, "Opslaan in", FONT_SMALL, C_DIM);
+    gfx_text_fit(s, 16, 104, 150, dest, FONT_BOLD, C_TEXT);
+    int fw = gfx_text_w(space, FONT_SMALL);
+    gfx_text(s, 240 - gfx_text_w("Vrij", FONT_SMALL), 92, "Vrij", FONT_SMALL, C_DIM);
+    gfx_text(s, 240 - fw, 105, space, FONT_SMALL, warn ? C_RED : C_TEXT);
+    if (warn)
+        gfx_text(s, 16, 118, "Te weinig ruimte op de SD-kaart!", FONT_SMALL, C_RED);
+
+    // Buttons
+    ui_button(s, HIT_BTN + 0, 8, 140, 62, 26, "B", "Terug", false);
+    ui_button(s, HIT_BTN + 1, 74, 140, 74, 26, "Y", "Map", false);
+    ui_button(s, HIT_BTN + 2, 152, 140, 96, 26, "A", "Download", true);
+    gfx_text_center(s, 128, 174, "L/R: andere screenshot", FONT_SMALL, C_FAINT);
 }
 
 void ui_info_top(const char *title, const char *const *lines, int nlines,
@@ -1144,11 +1367,11 @@ void ui_keyboard(const ui_kbd_t *k)
     surface_t *s = &scr_bot;
     ui_hits_clear();
     gfx_noclip(s);
-    gfx_vgrad(s, 0, 0, SCR_W, SCR_H, RGB(232, 237, 245), RGB(208, 217, 230));
+    gfx_vgrad(s, 0, 0, SCR_W, SCR_H, C_BG1, C_BG2);
 
     // Input field
     gfx_text_fit(s, 8, 1, 240, k->title ? k->title : "", FONT_SMALL, C_DIM);
-    gfx_rrect(s, 4, 14, 248, 26, 9, C_WHITE);
+    gfx_rrect(s, 4, 14, 248, 26, 9, C_SURFACE);
     gfx_rrect_line(s, 4, 14, 248, 26, 9, 2, C_ACCENT);
     char shown[80];
     size_t len = strlen(k->buf);
@@ -1172,7 +1395,7 @@ void ui_keyboard(const ui_kbd_t *k)
         kkey_t *kk = &keys[i];
         bool special = kk->code < 0 || kk->code == ' ';
         bool active = (kk->code == KB_SHIFT && k->shift) || (kk->code == KB_SYMS && k->symbols);
-        color_t bg = kk->code == KB_OK ? C_ACCENT : active ? C_ACCENT_L : special ? RGB(241, 244, 249) : C_WHITE;
+        color_t bg = kk->code == KB_OK ? C_ACCENT : active ? C_ACCENT_L : special ? C_SURFACE2 : C_SURFACE;
         gfx_rrect_blend(s, kk->x, kk->y + 1, kk->w, kk->h, 6, RGB(0, 30, 70), 50);
         gfx_rrect(s, kk->x, kk->y, kk->w, kk->h, 6, bg);
         if (i == k->pressed_key && k->press_t > 0)

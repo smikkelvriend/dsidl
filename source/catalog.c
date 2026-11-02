@@ -237,6 +237,9 @@ static void entry_free(cat_entry_t *e)
     free(e->description);
     free(e->version);
     free(e->category);
+    free(e->icon);
+    for (int i = 0; i < e->num_shots; i++)
+        free(e->shots[i]);
     for (int i = 0; i < e->num_dl; i++)
     {
         free(e->dl[i].name);
@@ -342,6 +345,53 @@ static char *parse_str_array(js_t *j, bool keep_first, bool *has_ds)
     return first;
 }
 
+// "screenshots": [ { "description": ..., "url": ... }, ... ]
+static void parse_shots(js_t *j, cat_entry_t *e)
+{
+    expect(j, '[');
+    if (peek(j, ']'))
+    {
+        j->p++;
+        return;
+    }
+    while (!j->error)
+    {
+        if (peek(j, '{'))
+        {
+            j->p++;
+            if (!peek(j, '}'))
+            {
+                while (!j->error)
+                {
+                    char *k = str(j, true);
+                    expect(j, ':');
+                    if (k && strcmp(k, "url") == 0 && peek(j, '"') && e->num_shots < MAX_SHOTS)
+                        e->shots[e->num_shots++] = str(j, true);
+                    else
+                        skip(j);
+                    free(k);
+                    if (peek(j, ','))
+                    {
+                        j->p++;
+                        continue;
+                    }
+                    break;
+                }
+            }
+            expect(j, '}');
+        }
+        else
+            skip(j);
+        if (peek(j, ','))
+        {
+            j->p++;
+            continue;
+        }
+        expect(j, ']');
+        return;
+    }
+}
+
 static bool parse_entry(js_t *j, cat_entry_t *e)
 {
     bool is_ds = false;
@@ -369,6 +419,10 @@ static bool parse_entry(js_t *j, cat_entry_t *e)
             e->description = str(j, true);
         else if (strcmp(k, "version") == 0 && is_str)
             e->version = str(j, true);
+        else if (strcmp(k, "icon") == 0 && is_str && !e->icon)
+            e->icon = str(j, true);
+        else if (strcmp(k, "screenshots") == 0 && peek(j, '['))
+            parse_shots(j, e);
         else if (strcmp(k, "categories") == 0 && peek(j, '['))
             e->category = parse_str_array(j, true, NULL);
         else if (strcmp(k, "systems") == 0 && peek(j, '['))

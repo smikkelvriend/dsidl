@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 
 #include "util.h"
 
@@ -119,4 +120,37 @@ bool contains_ci(const char *haystack, const char *needle)
             return true;
     }
     return false;
+}
+
+bool disk_space(const char *drive, unsigned long long *free_b, unsigned long long *total_b)
+{
+    char root[16];
+    snprintf(root, sizeof(root), "%s/", drive);
+    struct statvfs st;
+    if (statvfs(root, &st) != 0)
+        return false;
+    if (free_b)
+        *free_b = (unsigned long long)st.f_bavail * st.f_frsize;
+    if (total_b)
+        *total_b = (unsigned long long)st.f_blocks * st.f_frsize;
+    return true;
+}
+
+void format_size64(unsigned long long b, char *out, size_t outlen)
+{
+    if (b >= 1024ULL * 1024 * 1024)
+        snprintf(out, outlen, "%llu.%llu GB", b >> 30, ((b & ((1ULL << 30) - 1)) * 10) >> 30);
+    else
+        format_size((unsigned long)b, out, outlen);
+}
+
+uint32_t fnv1a(const char *s)
+{
+    uint32_t h = 2166136261u;
+    while (*s)
+    {
+        h ^= (unsigned char)*s++;
+        h *= 16777619u;
+    }
+    return h;
 }

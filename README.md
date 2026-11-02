@@ -6,8 +6,15 @@ Homebrew-downloader voor de (gemodde) Nintendo DSi. Alles werkt op de DSi zelf v
 
 - **Lijst + zoeken**: haalt de homebrew-catalogus van [Universal-DB](https://db.universal-team.net) op (dezelfde bron als Universal-Updater), toont alle DS/DSi-titels met een `.nds`- of `.dsi`-bestand en laat je zoeken en filteren.
 - **Downloaden naar een map naar keuze**: standaard `sd:/roms/nds/`; druk bij het downloaden op **Y** om door je SD-kaart te bladeren en een andere map te kiezen (of een nieuwe te maken). DSiDL onthoudt de laatst gekozen map.
-- **Bestanden beheren vanaf je telefoon**: de DSi wordt een mini-webserver. Open het getoonde adres (bv. `http://192.168.1.23`) in de browser van je telefoon: blader door de hele SD-kaart, upload naar elke map, download naar je telefoon, maak mappen, hernoem, verwijder, en verberg of toon bestanden/mappen (bv. een map die je in TWiLight Menu++ verborgen hebt).
+- **Bestanden beheren vanaf je telefoon**: de DSi wordt een mini-webserver. Open het getoonde adres (bv. `http://192.168.1.23`) in de browser van je telefoon: blader door de hele SD-kaart, upload losse bestanden of hele mappen naar elke map, bekijk je DSi-camerafoto's in een galerij en download ze (of elke map) als zip, download naar je telefoon, maak mappen, hernoem, verwijder, en verberg of toon bestanden/mappen (bv. een map die je in TWiLight Menu++ verborgen hebt).
 - **Wifi-beheer**: zoek netwerken, kies er een en typ het wachtwoord met het schermtoetsenbord. Netwerken worden bewaard in `sd:/_dsidl/wifi.txt` (niet in het interne geheugen van de DSi) en DSiDL verbindt daarna automatisch met het sterkste bekende netwerk. De netwerken uit de DSi-instellingen werken ook gewoon.
+- **Mijn software**: alle .nds/.dsi-programma's op je SD-kaart met hun eigen icoon en titel (uit het bestand zelf); verplaatsen, kopiëren, hernoemen of verwijderen. In de downloadlijst staat bij wat je al hebt "Geïnstalleerd".
+- **Icoontjes en screenshots**: de lijst toont de echte icoontjes uit Universal-DB (op de achtergrond opgehaald en bewaard in `_dsidl/icons`); A opent een detailpagina met screenshots (L/R om te bladeren), de vrije ruimte en de downloadknop.
+- **Opslagruimte**: vrije ruimte op de detailpagina, in *Bestanden* en op de telefoonpagina; downloads die niet passen worden tegengehouden.
+- **Bestanden**: bestandsbeheer op de DSi zelf (verplaatsen, kopiëren, hernoemen, verbergen, verwijderen, nieuwe map).
+- **Boxart**: zoekt je games op de SD-kaart en haalt de hoesjes op bij GameTDB voor TWiLight Menu++ (`_nds/TWiLightMenu/boxart`).
+- **Instellen**: licht of donker thema, 6 accentkleuren, geluid aan/uit, standaardmap.
+- **Geluidjes**: zachte tikjes en klikjes, en een melodietje als een download klaar is (in code gemaakt, geen geluidsbestanden).
 - **TWiLight Menu++ bijwerken**: via het menu (maantje) installeert DSiDL de nieuwste TWiLight Menu++ op de DSi zelf. Omdat het officiële .7z-archief te groot is om op een DSi uit te pakken, pakt een GitHub Action (`.github/workflows/twilight.yml`) het dagelijks om naar een DSi-vriendelijke zip (alleen `BOOT.NDS` en `_nds/`, je instellingen blijven staan). DSiDL downloadt die, pakt hem uit en verwijdert de zip daarna. Herstart je DSi na afloop.
 - **Zichzelf updaten**: via het menu haalt DSiDL de nieuwste versie van GitHub en vervangt zijn eigen `.nds`-bestand.
 
@@ -85,6 +92,6 @@ make APP_VERSION=1.0.1
 - Titels die alleen als `.zip`/`.7z` worden aangeboden (bv. TWiLight Menu++, nds-bootstrap) staan niet in de lijst; uitpakken op de DSi zit er (nog) niet in.
 - De DSi heeft geen klok met zekere tijd, dus de geldigheidsdatum van certificaten wordt niet gecontroleerd (de handtekening en de servernaam wel).
 
-Licenties: Mbed TLS (Apache-2.0), rootcertificaten van Mozilla (MPL-2.0), BlocksDS/libnds (zlib), lettertype Poppins (SIL Open Font License), QR Code generator van Project Nayuki (MIT), miniz/tinfl voor het uitpakken (MIT). TWiLight Menu++ is van DS-Homebrew (GPL-3.0).
+Licenties: Mbed TLS (Apache-2.0), rootcertificaten van Mozilla (MPL-2.0), BlocksDS/libnds (zlib), lettertype Poppins (SIL Open Font License), QR Code generator van Project Nayuki (MIT), miniz/tinfl voor het uitpakken (MIT), stb_image voor PNG/JPG (public domain). Hoesjes komen van GameTDB. TWiLight Menu++ is van DS-Homebrew (GPL-3.0).
 
 Ontwerp bekijken zonder DSi: `cc -Isource tools/preview/host.c source/gfx.c source/ui.c source/font_data.c source/qrcodegen.c -o preview && ./preview` maakt van elk scherm een afbeelding.

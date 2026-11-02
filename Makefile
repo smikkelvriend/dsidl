@@ -3,7 +3,7 @@
 BLOCKSDS	?= /opt/blocksds/core
 BLOCKSDSEXT	?= /opt/blocksds/external
 
-APP_VERSION	?= 2.1.1
+APP_VERSION	?= 2.2.0
 
 NAME		:= dsidl
 GAME_TITLE	:= DSiDL

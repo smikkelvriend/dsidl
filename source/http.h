@@ -11,6 +11,7 @@ typedef struct {
     volatile size_t done;
     volatile size_t total;     // 0 if unknown
     volatile bool cancel;      // set by UI to abort
+    volatile bool counts;      // done/total are item counts, not bytes
     char status[64];
 } http_progress_t;
 

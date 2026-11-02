@@ -31,6 +31,8 @@ static void save(const char *name)
 int main(void)
 {
     scr_top.px = top_px; scr_bot.px = bot_px;
+    const char *dk = getenv("DARK");
+    ui_set_theme(dk && dk[0] == '1', dk ? atoi(dk + 1) : 0);
     gfx_noclip(&scr_top); gfx_noclip(&scr_bot);
 
     ui_item_t it = { "Pixel Doodle", "Thomas Armstrong", "v0.24.0", "app",

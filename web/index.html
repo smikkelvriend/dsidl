@@ -60,6 +60,14 @@ main{padding:0 10px 120px}
 .paste .row{display:flex;gap:8px}
 .busy{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;place-items:center;z-index:40}
 .busy div{background:#1f1f1f;padding:18px 22px;border-radius:14px;font-size:15px}
+.gal{display:none;padding:0 10px 120px}
+.gal .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.gal .grid div{aspect-ratio:4/3;background:#1d1d1d;border-radius:10px;overflow:hidden}
+.gal img{width:100%;height:100%;object-fit:cover;display:block}
+.gal .head{display:flex;gap:8px;padding:10px 0}
+.viewer{position:fixed;inset:0;background:#000;display:none;z-index:50;flex-direction:column}
+.viewer img{flex:1;object-fit:contain;width:100%;min-height:0}
+.viewer .row{display:flex;gap:8px;padding:12px}
 .toast{position:fixed;left:50%;top:16px;transform:translateX(-50%) translateY(-80px);background:#2a2a2a;padding:10px 16px;border-radius:12px;z-index:30;transition:transform .2s;font-size:14px;max-width:90%}
 .toast.show{transform:translateX(-50%)}
 input[type=file]{display:none}
@@ -67,17 +75,25 @@ input[type=file]{display:none}
 </head>
 <body>
 <header>
-  <div class="top"><div class="logo">DSi</div><h1>SD-kaart</h1><span class="free" id="count"></span></div>
+  <div class="top"><div class="logo">DSi</div><h1>SD-kaart</h1><span class="free" id="space"></span></div>
+  <div class="free" id="count" style="margin-top:2px"></div>
   <div class="crumbs" id="crumbs"></div>
 </header>
 <div class="bar">
   <button class="btn" id="back">&#8592;</button>
   <button class="btn grow" id="mkdir">+ Map</button>
   <button class="btn" id="hidden" title="Verborgen tonen">&#128065;</button>
+  <button class="btn" id="photos">Foto's</button>
   <button class="btn primary grow" id="upbtn">&#8593; Uploaden</button>
   <input type="file" id="files" multiple>
+  <input type="file" id="folder" webkitdirectory directory multiple>
 </div>
-<main><div class="list" id="list"><div class="empty">Laden...</div></div></main>
+<main id="main"><div class="list" id="list"><div class="empty">Laden...</div></div></main>
+<div class="gal" id="gal">
+  <div class="head"><button class="btn" id="gal-back">&#8592; Bestanden</button><button class="btn primary grow" id="gal-zip">Alles downloaden (zip)</button></div>
+  <div class="grid" id="grid"></div>
+</div>
+<div class="viewer" id="viewer"><img id="v-img" alt=""><div class="row"><button class="btn grow" id="v-close">Sluiten</button><a class="btn primary grow" id="v-dl" style="justify-content:center;text-decoration:none">Downloaden</a></div></div>
 
 <div class="sheet-bg" id="bg"></div>
 <div class="sheet" id="sheet"><h3 id="sh-title"></h3><div id="sh-btns"></div></div>
@@ -142,7 +158,8 @@ $('bg').onclick=closeSheet;
 function sheet(e){
   const p=join(cwd,e.n);$('sh-title').textContent=e.n;
   const b=[];
-  if(e.d)b.push(['Openen',()=>load(p)]);else b.push(['Downloaden naar telefoon',()=>{location.href='/dl?path='+encodeURIComponent(p)}]);
+  if(e.d){b.push(['Openen',()=>load(p)]);b.push(['Downloaden als zip',()=>{location.href='/zip?path='+encodeURIComponent(p)}]);}
+  else b.push(['Downloaden naar telefoon',()=>{location.href='/dl?path='+encodeURIComponent(p)}]);
   b.push(['Naam wijzigen',async()=>{const n=prompt('Nieuwe naam',e.n);if(!n||n==e.n)return;
     try{await api('/api/rename?path='+encodeURIComponent(p)+'&to='+encodeURIComponent(n),{method:'POST'});toast('Hernoemd');load(cwd)}catch(x){toast(x.message)}}]);
   b.push(['Verplaatsen naar...',()=>startClip('move',p,e)]);
@@ -160,16 +177,23 @@ $('back').onclick=()=>{if(cwd=='/')return;load(cwd.substring(0,cwd.lastIndexOf('
 $('hidden').onclick=()=>{showHidden=!showHidden;localStorage.setItem('dsidl_hidden',showHidden?'1':'0');render();toast(showHidden?'Verborgen items worden getoond':'Verborgen items verborgen')};
 $('mkdir').onclick=async()=>{const n=prompt('Naam van de nieuwe map');if(!n)return;
   try{await api('/api/mkdir?path='+encodeURIComponent(join(cwd,n)),{method:'POST'});load(cwd)}catch(x){toast(x.message)}};
-$('upbtn').onclick=()=>$('files').click();
+$('upbtn').onclick=()=>{$('sh-title').textContent='Uploaden naar '+(cwd=='/'?'SD':cwd);$('sh-btns').innerHTML='';
+  for(const[t,f]of[['Bestanden kiezen',()=>$('files').click()],['Hele map kiezen',()=>$('folder').click()]]){const btn=document.createElement('button');btn.textContent=t;btn.onclick=()=>{closeSheet();f()};$('sh-btns').appendChild(btn)}
+  $('bg').style.display='block';requestAnimationFrame(()=>$('sheet').classList.add('open'))};
+$('folder').onchange=async()=>{const fs=[...$('folder').files];$('folder').value='';if(!fs.length)return;
+  let ok=0;for(let i=0;i<fs.length;i++){const f=fs[i];const rel=(f.webkitRelativePath||f.name).split('/');rel.pop();
+    const dir=join(cwd,'').replace(/\/$/,'')+(rel.length?'/'+rel.join('/'):'');
+    try{await upload(f,i+1,fs.length,dir||'/');ok++}catch(x){toast(f.name+': '+x)}}
+  $('up').style.display='none';toast(ok+' van '+fs.length+' bestand(en) verstuurd');load(cwd)};
 $('files').onchange=async()=>{const fs=[...$('files').files];$('files').value='';if(!fs.length)return;
   let ok=0;for(let i=0;i<fs.length;i++){try{await upload(fs[i],i+1,fs.length);ok++}catch(x){toast(fs[i].name+': '+x)}}
   $('up').style.display='none';if(clip)$('paste').style.display='block';toast(ok+' van '+fs.length+' bestand(en) verstuurd');load(cwd)};
 
 function fmtTime(s){s=Math.max(0,Math.round(s));const m=Math.floor(s/60),h=Math.floor(m/60);return h?h+':'+String(m%60).padStart(2,'0')+':'+String(s%60).padStart(2,'0'):m+':'+String(s%60).padStart(2,'0')}
-function upload(f,n,tot){return new Promise((res,rej)=>{
+function upload(f,n,tot,dir){return new Promise((res,rej)=>{
   $('up').style.display='block';$('paste').style.display='none';$('up-name').textContent=(tot>1?n+'/'+tot+' · ':'')+f.name;$('up-bar').style.width='0';$('up-pct').textContent='0%';$('up-info').textContent='';$('up-eta').textContent='';
   const x=new XMLHttpRequest(),t0=Date.now();
-  x.open('PUT','/upload?dir='+encodeURIComponent(cwd)+'&name='+encodeURIComponent(f.name));
+  x.open('PUT','/upload?dir='+encodeURIComponent(dir||cwd)+'&name='+encodeURIComponent(f.name));
   x.upload.onprogress=e=>{if(!e.lengthComputable)return;const p=e.loaded/e.total,sec=(Date.now()-t0)/1000,sp=e.loaded/Math.max(sec,.1);
     $('up-bar').style.width=(p*100)+'%';$('up-pct').textContent=Math.floor(p*100)+'%';
     $('up-info').textContent=size(e.loaded)+' / '+size(e.total)+' · '+size(sp)+'/s';
@@ -189,6 +213,17 @@ $('paste-go').onclick=async()=>{if(!clip)return;const c=clip;
   catch(x){toast(x.message)}
   $('busy').style.display='none';load(cwd)};
 
+async function space(){try{const i=JSON.parse(await api('/api/info'));$('space').textContent=size(i.free)+' vrij van '+size(i.total)}catch(e){}}
+let photos=[];
+$('photos').onclick=async()=>{$('main').style.display='none';document.querySelector('.bar').style.display='none';$('gal').style.display='block';$('grid').innerHTML='<div style="grid-column:1/-1;aspect-ratio:auto;padding:20px;text-align:center;color:var(--dim);background:none">Laden...</div>';
+  try{photos=JSON.parse(await api('/api/photos'))}catch(e){photos=[]}
+  if(!photos.length){$('grid').innerHTML='<div style="grid-column:1/-1;aspect-ratio:auto;padding:30px;text-align:center;color:var(--dim);background:none">Geen foto\'s gevonden.<br>Maak foto\'s met de DSi-camera en kies opslaan op de SD-kaart.</div>';return}
+  $('grid').innerHTML=photos.map((p,i)=>'<div data-i="'+i+'"><img loading="lazy" src="/dl?inline=1&path='+encodeURIComponent(p.p)+'"></div>').join('');
+  $('grid').querySelectorAll('div[data-i]').forEach(d=>d.onclick=()=>{const p=photos[d.dataset.i];$('v-img').src='/dl?inline=1&path='+encodeURIComponent(p.p);$('v-dl').href='/dl?path='+encodeURIComponent(p.p);$('viewer').style.display='flex'})};
+$('gal-back').onclick=()=>{$('gal').style.display='none';$('main').style.display='block';document.querySelector('.bar').style.display='flex'};
+$('gal-zip').onclick=()=>{location.href='/zip?path='+encodeURIComponent('/DCIM')};
+$('v-close').onclick=()=>{$('viewer').style.display='none';$('v-img').src=''};
+space();
 load(cwd);
 </script>
 </body>

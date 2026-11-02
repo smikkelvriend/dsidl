@@ -12,8 +12,13 @@ typedef struct {
     unsigned long size;
 } cat_download_t;
 
+#define MAX_SHOTS 4
+
 typedef struct {
     char *title;
+    char *icon;             // icon URL (may be NULL)
+    char *shots[MAX_SHOTS]; // screenshot URLs
+    int num_shots;
     char *author;
     char *description;
     char *version;

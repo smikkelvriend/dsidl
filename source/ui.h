@@ -6,26 +6,43 @@
 #include <stddef.h>
 
 #include "gfx.h"
+#include "img.h"
 
 // ---------------------------------------------------------------------------
 // Theme
 
-#define C_BG1      RGB(246, 248, 252)
-#define C_BG2      RGB(226, 233, 243)
-#define C_CARD     RGB(255, 255, 255)
-#define C_LINE     RGB(222, 228, 237)
-#define C_TEXT     RGB(40, 48, 61)
-#define C_DIM      RGB(123, 135, 152)
-#define C_FAINT    RGB(178, 188, 202)
-#define C_ACCENT   RGB(18, 158, 230)
-#define C_ACCENT2  RGB(10, 128, 200)
-#define C_ACCENT_L RGB(222, 242, 253)
+typedef struct {
+    color_t bg1, bg2, stripe;     // screen background gradient + stripes
+    color_t card, surface, surface2; // cards, bars/fields, secondary fields
+    color_t line, text, dim, faint;
+    color_t accent, accent2, accent_l;
+    bool dark;
+} theme_t;
+
+extern theme_t theme;
+
+#define C_BG1      theme.bg1
+#define C_BG2      theme.bg2
+#define C_CARD     theme.card
+#define C_SURFACE  theme.surface
+#define C_SURFACE2 theme.surface2
+#define C_LINE     theme.line
+#define C_TEXT     theme.text
+#define C_DIM      theme.dim
+#define C_FAINT    theme.faint
+#define C_ACCENT   theme.accent
+#define C_ACCENT2  theme.accent2
+#define C_ACCENT_L theme.accent_l
 #define C_GREEN    RGB(38, 190, 110)
 #define C_RED      RGB(238, 72, 82)
 #define C_ORANGE   RGB(255, 140, 48)
 #define C_PURPLE   RGB(140, 100, 242)
 #define C_WHITE    RGB(255, 255, 255)
 #define C_BLACK    RGB(0, 0, 0)
+
+#define UI_ACCENTS 6
+extern const char *const ui_accent_names[UI_ACCENTS];
+void ui_set_theme(bool dark, int accent);
 
 color_t ui_category_color(const char *category);
 
@@ -77,6 +94,7 @@ typedef struct {
     const char *file;
     unsigned long size;
     int dl_index, dl_count;
+    const img_t *icon;      // 44x44 (may be NULL)
 } ui_item_t;
 
 typedef struct {
@@ -84,6 +102,8 @@ typedef struct {
     const char *subtitle;
     const char *category;   // for the tile color (may be NULL)
     const char *badge;      // small text on the right (may be NULL)
+    const img_t *icon;      // 22x22 icon (may be NULL)
+    int kind;               // for file lists: 0 file, 1 folder
 } ui_row_t;
 
 // Hit ids used by the screens
@@ -116,6 +136,8 @@ void ui_dialog(const char *title, const char *text, const char *const *labels,
 void ui_progress_screen(const char *title, const char *name, const char *status,
                         unsigned long done, unsigned long total,
                         unsigned long speed, long eta_s, const char *cancel_label);
+// Same, but done/total are item counts ("12 / 48")
+extern int ui_progress_counts;
 
 typedef struct {
     const char *label;
@@ -143,6 +165,11 @@ void ui_list_screen(const char *header, const char *subheader, const ui_row_t *r
 #define LIST_STEP 33
 // icon_kind: 0 = letter tile, 1 = folder, 2 = wifi (badge "1".."4" = bars,
 // subtitle "lock" -> lock icon)
+
+// Details page of a catalog entry
+void ui_details_top(const ui_item_t *it, const img_t *shot, int idx, int count, bool loading,
+                    int frame);
+void ui_details_bottom(const ui_item_t *it, const char *dest, const char *space, bool warn);
 
 void ui_info_top(const char *title, const char *const *lines, int nlines,
                  bool wifi, int bars, const char *ssid);

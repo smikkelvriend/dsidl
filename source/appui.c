@@ -7,6 +7,7 @@
 
 #include "appui.h"
 #include "wifi.h"
+#include "sound.h"
 
 volatile uint32_t g_frames;
 
@@ -97,6 +98,7 @@ int app_dialog(const char *title, const char *text, const char *const *labels,
     if (backup)
         memcpy(backup, scr_bot.px, SCR_W * SCR_H * 2);
 
+    sound_play(SND_OPEN);
     // Pop in
     for (int a = 64; a <= 256; a += 64)
     {
@@ -141,6 +143,7 @@ done:
         // Show the press, then shrink away
         if (result >= 0)
         {
+            sound_play(SND_CLICK);
             memcpy(scr_bot.px, backup, SCR_W * SCR_H * 2);
             ui_dialog(title, text, labels, keys, n, primary, 256, result);
             gfx_present_bot();
@@ -272,6 +275,7 @@ bool app_text_input(const char *title, const char *hint, char *buf, size_t size,
                 pk = -1;
             k.pressed_key = pk;
             k.press_t = 5;
+            sound_play(SND_TICK);
             dirty = true;
         }
 
