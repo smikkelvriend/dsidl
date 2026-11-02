@@ -44,14 +44,13 @@ save_dir=sd:/roms/nds
 update_url=https://github.com/smikkelvriend/dsidl/releases/latest/download/
 ```
 
-## Zelf-update instellen (eenmalig)
+## Nieuwe versie uitbrengen
 
-De update-functie kijkt naar `<update_url>version.txt` en downloadt `<update_url>dsidl.nds`. Zo zet je dat op:
+De update-functie kijkt naar `<update_url>version.txt` en downloadt `<update_url>dsidl.nds`.
 
-1. Maak op GitHub een repo **`smikkelvriend/dsidl`** en zet deze map erin.
-2. Maak een tag, bv. `git tag v1.0.1 && git push --tags`.
-3. De GitHub Action in `.github/workflows/build.yml` bouwt de app en maakt een release met `dsidl.nds` en `version.txt`.
-4. Op de DSi: X → *DSiDL updaten*. Hij vergelijkt de versie, downloadt, controleert of het echt een DS-rom is en vervangt zichzelf (de oude versie wordt teruggezet als dat mislukt). Daarna sluit hij af; start hem opnieuw.
+1. Verhoog `APP_VERSION` in de `Makefile` (bv. `1.0.5`) en push naar `main`.
+2. De GitHub Action (`.github/workflows/build.yml`) bouwt de app en maakt automatisch de release `v1.0.5` met `dsidl.nds` en `version.txt`.
+3. Op de DSi: X → *DSiDL updaten*. Hij vergelijkt de versie, downloadt, controleert of het echt een DS-rom is en vervangt zichzelf (de oude versie wordt teruggezet als dat mislukt). Daarna sluit hij af; start hem opnieuw.
 
 Andere repo-naam? Pas `UPDATE_BASE` in `source/main.c` aan, of `update_url` in `settings.txt`.
 

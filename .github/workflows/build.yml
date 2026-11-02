@@ -1,8 +1,11 @@
 name: Build DSiDL
 
+# Every push to main builds the app and publishes (or updates) the release
+# "v<APP_VERSION>" from the Makefile. Bump APP_VERSION to ship an update; the
+# DSi finds it via releases/latest/download/version.txt.
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -13,35 +16,44 @@ jobs:
     runs-on: ubuntu-latest
     container: skylyrac/blocksds:slim-latest
     steps:
-      - uses: actions/checkout@v4
-
       - name: Install git
         run: |
           if ! command -v git >/dev/null; then
             (apt-get update && apt-get install -y git) || wf-pacman -Sy --noconfirm git
           fi
 
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: ver
+        run: |
+          VERSION=$(sed -n 's/^APP_VERSION[[:space:]]*?=[[:space:]]*//p' Makefile | head -n1)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
       - name: Build Mbed TLS
         run: sh mbedtls-port/build-mbedtls.sh
 
       - name: Build DSiDL
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          case "$VERSION" in [0-9]*) ;; *) VERSION=1.0.0 ;; esac
-          make APP_VERSION="$VERSION"
-          echo "$VERSION" > version.txt
+          make APP_VERSION="${{ steps.ver.outputs.version }}"
+          echo "${{ steps.ver.outputs.version }}" > version.txt
 
       - uses: actions/upload-artifact@v4
         with:
-          name: dsidl
+          name: dsidl-${{ steps.ver.outputs.version }}
           path: |
             dsidl.nds
             version.txt
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: DSiDL ${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          overwrite_files: true
           files: |
             dsidl.nds
             version.txt
