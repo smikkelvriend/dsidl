@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0e0e0e">
+<title>DSiDL – SD-kaart</title>
+<style>
+:root{--bg:#0e0e0e;--card:#191919;--line:#262626;--text:#eee;--dim:#8a8a8a;--acc:#d71921;--ok:#2fbf71}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{position:sticky;top:0;z-index:5;background:rgba(14,14,14,.92);backdrop-filter:blur(10px);padding:14px 16px 10px;border-bottom:1px solid var(--line)}
+.top{display:flex;align-items:center;gap:10px}
+.logo{width:30px;height:30px;border-radius:8px;background:var(--acc);display:grid;place-items:center;font-weight:800;font-size:13px}
+h1{font-size:18px;margin:0;flex:1}
+.free{color:var(--dim);font-size:12px}
+.crumbs{display:flex;gap:2px;overflow-x:auto;white-space:nowrap;margin-top:10px;scrollbar-width:none}
+.crumbs::-webkit-scrollbar{display:none}
+.crumbs button{background:none;border:0;color:var(--dim);font:inherit;padding:4px 6px;border-radius:6px}
+.crumbs button:last-child{color:var(--text);font-weight:600}
+.crumbs span{color:#444;align-self:center}
+.bar{display:flex;gap:8px;padding:10px 16px}
+.btn{border:1px solid var(--line);background:var(--card);color:var(--text);font:inherit;font-size:14px;padding:9px 12px;border-radius:10px;display:flex;align-items:center;gap:6px}
+.btn.primary{background:var(--acc);border-color:var(--acc);font-weight:600}
+.btn:active{transform:scale(.97)}
+.grow{flex:1}
+main{padding:0 10px 120px}
+.list{background:var(--card);border-radius:14px;overflow:hidden}
+.item{display:flex;align-items:center;gap:12px;padding:11px 12px;border-bottom:1px solid var(--line);cursor:pointer;user-select:none}
+.item:last-child{border-bottom:0}
+.item:active{background:#222}
+.ic{width:36px;height:36px;border-radius:9px;display:grid;place-items:center;flex:none;font-size:11px;font-weight:700;letter-spacing:.3px}
+.ic.dir{background:#2a2312;color:#e9b949}
+.ic.nds{background:#2a1416;color:#ff5a62}
+.ic.gba{background:#1c1a2e;color:#9b8cff}
+.ic.img{background:#132a1f;color:#4fd18b}
+.ic.file{background:#222;color:#aaa}
+.meta{flex:1;min-width:0}
+.name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sub{color:var(--dim);font-size:12px}
+.hid{opacity:.5}
+.tag{font-size:10px;border:1px solid #444;border-radius:5px;padding:0 4px;margin-left:6px;color:var(--dim)}
+.more{background:none;border:0;color:var(--dim);font-size:22px;padding:0 6px;line-height:1}
+.empty{padding:40px 20px;text-align:center;color:var(--dim)}
+.sheet-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;z-index:20}
+.sheet{position:fixed;left:0;right:0;bottom:0;background:#1b1b1b;border-radius:18px 18px 0 0;padding:8px 8px calc(14px + env(safe-area-inset-bottom));z-index:21;transform:translateY(110%);transition:transform .2s}
+.sheet.open{transform:none}
+.sheet h3{margin:8px 12px 10px;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sheet button{display:block;width:100%;text-align:left;background:none;border:0;color:var(--text);font:inherit;font-size:16px;padding:13px 14px;border-radius:10px}
+.sheet button:active{background:#262626}
+.sheet .danger{color:#ff5a62}
+.up{position:fixed;left:10px;right:10px;bottom:calc(12px + env(safe-area-inset-bottom));background:#1f1f1f;border:1px solid var(--line);border-radius:14px;padding:12px 14px;display:none;z-index:10;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+.up .row{display:flex;justify-content:space-between;font-size:13px;gap:10px}
+.up .row span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prog{height:6px;background:#333;border-radius:3px;overflow:hidden;margin-top:8px}
+.prog div{height:100%;width:0;background:var(--acc);transition:width .15s}
+.toast{position:fixed;left:50%;top:16px;transform:translateX(-50%) translateY(-80px);background:#2a2a2a;padding:10px 16px;border-radius:12px;z-index:30;transition:transform .2s;font-size:14px;max-width:90%}
+.toast.show{transform:translateX(-50%)}
+input[type=file]{display:none}
+</style>
+</head>
+<body>
+<header>
+  <div class="top"><div class="logo">DSi</div><h1>SD-kaart</h1><span class="free" id="count"></span></div>
+  <div class="crumbs" id="crumbs"></div>
+</header>
+<div class="bar">
+  <button class="btn" id="back">&#8592;</button>
+  <button class="btn grow" id="mkdir">+ Map</button>
+  <button class="btn" id="hidden" title="Verborgen tonen">&#128065;</button>
+  <button class="btn primary grow" id="upbtn">&#8593; Uploaden</button>
+  <input type="file" id="files" multiple>
+</div>
+<main><div class="list" id="list"><div class="empty">Laden...</div></div></main>
+
+<div class="sheet-bg" id="bg"></div>
+<div class="sheet" id="sheet"><h3 id="sh-title"></h3><div id="sh-btns"></div></div>
+
+<div class="up" id="up">
+  <div class="row"><span id="up-name"></span><span id="up-pct"></span></div>
+  <div class="prog"><div id="up-bar"></div></div>
+  <div class="row" style="margin-top:6px;color:var(--dim)"><span id="up-info"></span><span id="up-eta"></span></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+let cwd=localStorage.getItem('dsidl_cwd')||'/roms/nds';
+let showHidden=localStorage.getItem('dsidl_hidden')==='1';
+let entries=[];
+
+function toast(t){const e=$('toast');e.textContent=t;e.classList.add('show');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('show'),2500)}
+function size(b){if(b<1024)return b+' B';if(b<1048576)return (b/1024).toFixed(0)+' KB';if(b<1073741824)return (b/1048576).toFixed(1)+' MB';return (b/1073741824).toFixed(2)+' GB'}
+function join(d,n){return (d=='/'?'':d)+'/'+n}
+function esc(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function kind(n,dir){if(dir)return['dir','MAP'];const e=(n.split('.').pop()||'').toLowerCase();
+ if(['nds','dsi','srl','app'].includes(e))return['nds',e.toUpperCase()];
+ if(['gba','gb','gbc','nes','sfc','smc','gen','md','sms','gg','pce'].includes(e))return['gba',e.toUpperCase()];
+ if(['png','bmp','jpg','jpeg','gif'].includes(e))return['img',e.toUpperCase()];
+ return['file',(e||'?').slice(0,4).toUpperCase()]}
+
+async function api(url,opt){const r=await fetch(url,opt);const t=await r.text();if(!r.ok)throw new Error(t||('HTTP '+r.status));return t}
+
+async function load(path){
+  try{
+    const t=await api('/api/list?path='+encodeURIComponent(path));
+    entries=JSON.parse(t);cwd=path;localStorage.setItem('dsidl_cwd',cwd);render();
+  }catch(e){if(path!='/'){toast('Map niet gevonden, terug naar /');load('/')}else toast(e.message)}
+}
+
+function render(){
+  const parts=cwd.split('/').filter(Boolean);let h='<button data-p="/">SD</button>',acc='';
+  for(const p of parts){acc+='/'+p;h+='<span>/</span><button data-p="'+esc(acc)+'">'+esc(p)+'</button>'}
+  $('crumbs').innerHTML=h;$('crumbs').scrollLeft=1e6;
+  $('crumbs').querySelectorAll('button').forEach(b=>b.onclick=()=>load(b.dataset.p));
+  $('hidden').style.borderColor=showHidden?'var(--acc)':'';
+  const list=entries.filter(e=>showHidden||!e.h).sort((a,b)=>(b.d-a.d)||a.n.localeCompare(b.n,undefined,{numeric:true,sensitivity:'base'}));
+  const nh=entries.filter(e=>e.h).length;
+  $('count').textContent=list.length+' items'+(nh&&!showHidden?' · '+nh+' verborgen':'');
+  if(!list.length){$('list').innerHTML='<div class="empty">Deze map is leeg'+(nh&&!showHidden?'<br><br>Er zijn '+nh+' verborgen items. Tik op &#128065; om ze te zien.':'')+'</div>';return}
+  $('list').innerHTML=list.map((e,i)=>{const[k,l]=kind(e.n,e.d);
+    return '<div class="item'+(e.h?' hid':'')+'" data-i="'+entries.indexOf(e)+'"><div class="ic '+k+'">'+l+'</div><div class="meta"><div class="name">'+esc(e.n)+(e.h?'<span class="tag">verborgen</span>':'')+'</div><div class="sub">'+(e.d?'Map':size(e.s))+'</div></div><button class="more">&#8942;</button></div>'}).join('');
+  $('list').querySelectorAll('.item').forEach(el=>{const e=entries[el.dataset.i];
+    el.onclick=ev=>{if(ev.target.classList.contains('more'))return sheet(e);e.d?load(join(cwd,e.n)):sheet(e)};
+    el.querySelector('.more').onclick=()=>sheet(e)});
+}
+
+function closeSheet(){$('sheet').classList.remove('open');$('bg').style.display='none'}
+$('bg').onclick=closeSheet;
+function sheet(e){
+  const p=join(cwd,e.n);$('sh-title').textContent=e.n;
+  const b=[];
+  if(e.d)b.push(['Openen',()=>load(p)]);else b.push(['Downloaden naar telefoon',()=>{location.href='/dl?path='+encodeURIComponent(p)}]);
+  b.push(['Naam wijzigen',async()=>{const n=prompt('Nieuwe naam',e.n);if(!n||n==e.n)return;
+    try{await api('/api/rename?path='+encodeURIComponent(p)+'&to='+encodeURIComponent(n),{method:'POST'});toast('Hernoemd');load(cwd)}catch(x){toast(x.message)}}]);
+  b.push([e.h?'Zichtbaar maken':'Verbergen (in TWiLight e.d.)',async()=>{
+    try{await api('/api/hide?path='+encodeURIComponent(p)+'&on='+(e.h?0:1),{method:'POST'});toast(e.h?'Weer zichtbaar':'Verborgen');load(cwd)}catch(x){toast(x.message)}}]);
+  b.push(['Verwijderen',async()=>{if(!confirm((e.d?'Map':'Bestand')+' "'+e.n+'" verwijderen?'+(e.d?'\n(Alleen lege mappen)':'')))return;
+    try{await api('/api/delete?path='+encodeURIComponent(p),{method:'POST'});toast('Verwijderd');load(cwd)}catch(x){toast(x.message)}},'danger']);
+  $('sh-btns').innerHTML='';
+  for(const[t,f,c]of b){const btn=document.createElement('button');btn.textContent=t;if(c)btn.className=c;btn.onclick=()=>{closeSheet();f()};$('sh-btns').appendChild(btn)}
+  $('bg').style.display='block';requestAnimationFrame(()=>$('sheet').classList.add('open'));
+}
+
+$('back').onclick=()=>{if(cwd=='/')return;load(cwd.substring(0,cwd.lastIndexOf('/'))||'/')};
+$('hidden').onclick=()=>{showHidden=!showHidden;localStorage.setItem('dsidl_hidden',showHidden?'1':'0');render();toast(showHidden?'Verborgen items worden getoond':'Verborgen items verborgen')};
+$('mkdir').onclick=async()=>{const n=prompt('Naam van de nieuwe map');if(!n)return;
+  try{await api('/api/mkdir?path='+encodeURIComponent(join(cwd,n)),{method:'POST'});load(cwd)}catch(x){toast(x.message)}};
+$('upbtn').onclick=()=>$('files').click();
+$('files').onchange=async()=>{const fs=[...$('files').files];$('files').value='';if(!fs.length)return;
+  let ok=0;for(let i=0;i<fs.length;i++){try{await upload(fs[i],i+1,fs.length);ok++}catch(x){toast(fs[i].name+': '+x)}}
+  $('up').style.display='none';toast(ok+' van '+fs.length+' bestand(en) verstuurd');load(cwd)};
+
+function fmtTime(s){s=Math.max(0,Math.round(s));const m=Math.floor(s/60),h=Math.floor(m/60);return h?h+':'+String(m%60).padStart(2,'0')+':'+String(s%60).padStart(2,'0'):m+':'+String(s%60).padStart(2,'0')}
+function upload(f,n,tot){return new Promise((res,rej)=>{
+  $('up').style.display='block';$('up-name').textContent=(tot>1?n+'/'+tot+' · ':'')+f.name;$('up-bar').style.width='0';$('up-pct').textContent='0%';$('up-info').textContent='';$('up-eta').textContent='';
+  const x=new XMLHttpRequest(),t0=Date.now();
+  x.open('PUT','/upload?dir='+encodeURIComponent(cwd)+'&name='+encodeURIComponent(f.name));
+  x.upload.onprogress=e=>{if(!e.lengthComputable)return;const p=e.loaded/e.total,sec=(Date.now()-t0)/1000,sp=e.loaded/Math.max(sec,.1);
+    $('up-bar').style.width=(p*100)+'%';$('up-pct').textContent=Math.floor(p*100)+'%';
+    $('up-info').textContent=size(e.loaded)+' / '+size(e.total)+' · '+size(sp)+'/s';
+    if(sec>1)$('up-eta').textContent='nog '+fmtTime((e.total-e.loaded)/sp)};
+  x.onload=()=>x.status==200?res():rej(x.responseText||'HTTP '+x.status);
+  x.onerror=()=>rej('Verbinding verbroken');x.send(f)})}
+
+load(cwd);
+</script>
+</body>
+</html>

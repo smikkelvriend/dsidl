@@ -5,3 +5,4 @@ mbedtls-nds/
 *.elf
 *.map
 version.txt
+data/webui.bin

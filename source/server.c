@@ -5,6 +5,8 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <fat.h>
 
 #include <nds.h>
 #include <dswifi9.h>
@@ -16,72 +18,39 @@
 
 extern char drive[8];
 
-static const char page_html[] =
-"<!DOCTYPE html><html lang=nl><head><meta charset=utf-8>"
-"<meta name=viewport content='width=device-width,initial-scale=1'>"
-"<title>DSiDL</title><style>"
-"body{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:0;padding:20px;max-width:560px;margin:auto}"
-"h1{font-size:22px;margin:0 0 4px}p{color:#aaa;margin:0 0 18px}"
-".card{background:#1d1d1d;border-radius:14px;padding:16px;margin-bottom:14px}"
-"label{display:block;font-size:13px;color:#aaa;margin-bottom:6px}"
-"select,input[type=text]{width:100%;box-sizing:border-box;padding:12px;border-radius:10px;border:1px solid #333;background:#000;color:#eee;font-size:16px}"
-"input[type=file]{width:100%;color:#eee;font-size:15px}"
-"button{width:100%;padding:14px;border:0;border-radius:12px;background:#d71921;color:#fff;font-size:17px;font-weight:600;margin-top:6px}"
-"button:disabled{background:#444}"
-".bar{height:10px;background:#333;border-radius:5px;overflow:hidden;margin-top:8px}"
-".bar div{height:100%;width:0;background:#d71921;transition:width .2s}"
-".log{font-size:14px;white-space:pre-wrap;color:#ccc}"
-"</style></head><body>"
-"<h1>DSiDL</h1><p>Bestanden naar je DSi sturen via wifi</p>"
-"<div class=card><label>Map op de SD-kaart</label>"
-"<select id=dir>"
-"<option value='/roms/nds'>/roms/nds (DS en DSi)</option>"
-"<option value='/roms/gba'>/roms/gba</option>"
-"<option value='/roms/gb'>/roms/gb</option>"
-"<option value='/roms/nes'>/roms/nes</option>"
-"<option value='/roms/snes'>/roms/snes</option>"
-"<option value='/roms/gen'>/roms/gen</option>"
-"<option value='/'>/ (hoofdmap)</option>"
-"<option value='_custom'>Andere map...</option>"
-"</select>"
-"<input type=text id=custom placeholder='/mijn/map' style='display:none;margin-top:8px'></div>"
-"<div class=card><label>Bestanden</label><input type=file id=f multiple>"
-"<button id=go>Versturen</button>"
-"<div class=bar><div id=bar></div></div></div>"
-"<div class='card log' id=log>Klaar om te versturen.</div>"
-"<script>"
-"const $=id=>document.getElementById(id);"
-"$('dir').onchange=()=>{$('custom').style.display=$('dir').value=='_custom'?'block':'none'};"
-"function up(file,dir){return new Promise((ok,bad)=>{"
-"const x=new XMLHttpRequest();"
-"x.open('PUT','/upload?dir='+encodeURIComponent(dir)+'&name='+encodeURIComponent(file.name));"
-"x.upload.onprogress=e=>{if(e.lengthComputable)$('bar').style.width=(100*e.loaded/e.total)+'%'};"
-"x.onload=()=>x.status==200?ok(x.responseText):bad(x.responseText||('HTTP '+x.status));"
-"x.onerror=()=>bad('Verbinding verbroken');x.send(file);})}"
-"$('go').onclick=async()=>{"
-"const files=[...$('f').files];if(!files.length){$('log').textContent='Kies eerst een bestand.';return}"
-"let dir=$('dir').value;if(dir=='_custom')dir=$('custom').value||'/';"
-"$('go').disabled=true;let log='';"
-"for(const f of files){log+=f.name+' ... ';$('log').textContent=log;$('bar').style.width='0';"
-"try{await up(f,dir);log+='klaar\\n'}catch(e){log+='MISLUKT: '+e+'\\n'}"
-"$('log').textContent=log}"
-"$('go').disabled=false};"
-"</script></body></html>";
+// Web page (web/index.html, embedded at build time)
+#include "webui_bin.h"
 
 static bool send_all(int fd, const void *data, size_t len)
 {
     const char *p = data;
+    int idle = 0;
     while (len > 0)
     {
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(fd, &wfds);
+        struct timeval tv = { 0, 20 * 1000 };
+        int s = select(fd + 1, NULL, &wfds, NULL, &tv);
+        if (s < 0)
+            return false;
+        if (s == 0)
+        {
+            cothread_yield();
+            idle += 20;
+            if (idle > 20000)
+                return false;
+            continue;
+        }
         int r = send(fd, p, len, 0);
         if (r <= 0)
             return false;
+        idle = 0;
         p += r;
         len -= r;
     }
     return true;
 }
-
 
 // recv() that never blocks for long: waits in small steps with select() and
 // yields to the UI thread in between. Gives up after idle_ms without data or
@@ -112,7 +81,8 @@ static void reply(int fd, int code, const char *ctype, const char *body, size_t 
 {
     char hdr[256];
     const char *msg = code == 200 ? "OK" : code == 404 ? "Not Found" :
-                      code == 400 ? "Bad Request" : "Internal Server Error";
+                      code == 400 ? "Bad Request" : code == 403 ? "Forbidden" :
+                      code == 409 ? "Conflict" : "Internal Server Error";
     int n = snprintf(hdr, sizeof(hdr),
                      "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %u\r\n"
                      "Connection: close\r\nCache-Control: no-store\r\n\r\n",
@@ -309,6 +279,290 @@ static void handle_upload(int fd, server_state_t *st, const char *query,
     reply_text(fd, 200, "OK");
 }
 
+
+// ---------------------------------------------------------------------------
+// File browser API
+
+// Converts a web path ("/roms/nds/x.nds") into a full path ("sd:/roms/nds/x.nds")
+static bool resolve(const char *query, const char *key, char *out, size_t outlen,
+                    char *clean, size_t cleanlen)
+{
+    char raw[256];
+    if (!query_param(query, key, raw, sizeof(raw)))
+        return false;
+    if (!sanitize_dir(raw, clean, cleanlen))
+        return false;
+    snprintf(out, outlen, "%s%s", drive, clean);
+    return true;
+}
+
+typedef struct {
+    char *p;
+    size_t len, cap;
+} sbuf_t;
+
+static bool sb_add(sbuf_t *b, const char *s, size_t n)
+{
+    if (b->len + n + 1 > b->cap)
+    {
+        size_t nc = b->cap ? b->cap * 2 : 4096;
+        while (nc < b->len + n + 1)
+            nc *= 2;
+        char *np = realloc(b->p, nc);
+        if (!np)
+            return false;
+        b->p = np;
+        b->cap = nc;
+    }
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+    b->p[b->len] = '\0';
+    return true;
+}
+
+static void sb_str(sbuf_t *b, const char *s)
+{
+    sb_add(b, s, strlen(s));
+}
+
+static void sb_json_str(sbuf_t *b, const char *s)
+{
+    sb_add(b, "\"", 1);
+    for (; *s; s++)
+    {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\')
+        {
+            char e[2] = { '\\', (char)c };
+            sb_add(b, e, 2);
+        }
+        else if (c < 32)
+        {
+            char e[8];
+            snprintf(e, sizeof(e), "\\u%04x", c);
+            sb_str(b, e);
+        }
+        else
+        {
+            sb_add(b, (const char *)&c, 1);
+        }
+    }
+    sb_add(b, "\"", 1);
+}
+
+static void api_list(int fd, server_state_t *st, const char *query)
+{
+    char full[300], clean[256];
+    if (!resolve(query, "path", full, sizeof(full), clean, sizeof(clean)))
+    {
+        reply_text(fd, 400, "Ongeldig pad");
+        return;
+    }
+    // opendir() on a drive root wants the trailing slash
+    if (strcmp(clean, "/") == 0)
+        snprintf(full, sizeof(full), "%s/", drive);
+
+    DIR *d = opendir(full);
+    if (!d)
+    {
+        reply_text(fd, 404, "Map niet gevonden");
+        return;
+    }
+
+    sbuf_t b = { 0 };
+    sb_str(&b, "[");
+    bool first = true;
+    struct dirent *de;
+    int n = 0;
+    while ((de = readdir(d)) != NULL)
+    {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+            continue;
+
+        char path[560];
+        snprintf(path, sizeof(path), "%s%s%s", drive, strcmp(clean, "/") == 0 ? "/" : clean,
+                 strcmp(clean, "/") == 0 ? "" : "/");
+        size_t pl = strlen(path);
+        snprintf(path + pl, sizeof(path) - pl, "%s", de->d_name);
+
+        bool is_dir = de->d_type == DT_DIR;
+        unsigned long size = 0;
+        if (!is_dir)
+        {
+            struct stat stt;
+            if (stat(path, &stt) == 0)
+                size = stt.st_size;
+        }
+        int attr = FAT_getAttr(path);
+        bool hidden = attr >= 0 && (attr & ATTR_HIDDEN);
+
+        char num[48];
+        if (!first)
+            sb_str(&b, ",");
+        first = false;
+        sb_str(&b, "{\"n\":");
+        sb_json_str(&b, de->d_name);
+        snprintf(num, sizeof(num), ",\"d\":%d,\"s\":%lu,\"h\":%d}", is_dir, size, hidden);
+        sb_str(&b, num);
+
+        if ((++n % 16) == 0)
+            cothread_yield();
+    }
+    closedir(d);
+    sb_str(&b, "]");
+
+    if (!b.p)
+        reply_text(fd, 500, "Geen geheugen");
+    else
+        reply(fd, 200, "application/json; charset=utf-8", b.p, b.len);
+    free(b.p);
+    (void)st;
+}
+
+static void api_download(int fd, server_state_t *st, const char *query)
+{
+    char full[300], clean[256];
+    if (!resolve(query, "path", full, sizeof(full), clean, sizeof(clean)))
+    {
+        reply_text(fd, 400, "Ongeldig pad");
+        return;
+    }
+    struct stat stt;
+    FILE *f = fopen(full, "rb");
+    if (!f || stat(full, &stt) != 0)
+    {
+        if (f)
+            fclose(f);
+        reply_text(fd, 404, "Bestand niet gevonden");
+        return;
+    }
+
+    const char *name = strrchr(clean, '/');
+    name = name ? name + 1 : clean;
+    char safe[128];
+    snprintf(safe, sizeof(safe), "%s", name);
+    for (char *c = safe; *c; c++)
+        if (*c == '"' || (unsigned char)*c < 32)
+            *c = '_';
+
+    char hdr[400];
+    int n = snprintf(hdr, sizeof(hdr),
+                     "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
+                     "Content-Length: %lu\r\n"
+                     "Content-Disposition: attachment; filename=\"%s\"\r\n"
+                     "Connection: close\r\n\r\n", (unsigned long)stt.st_size, safe);
+    if (!send_all(fd, hdr, n))
+    {
+        fclose(f);
+        return;
+    }
+
+    snprintf(st->current, sizeof(st->current), "%s", safe);
+    st->total = stt.st_size;
+    st->done = 0;
+    st->sending = true;
+
+    char *buf = malloc(16 * 1024);
+    while (buf && !st->stop)
+    {
+        size_t r = fread(buf, 1, 16 * 1024, f);
+        if (r == 0)
+            break;
+        if (!send_all(fd, buf, r))
+            break;
+        st->done += r;
+        cothread_yield();
+    }
+    free(buf);
+    fclose(f);
+    st->sending = false;
+    if (st->done == st->total)
+        snprintf(st->last_msg, sizeof(st->last_msg), "Verstuurd: %.70s", safe);
+}
+
+static void api_action(int fd, server_state_t *st, const char *target, const char *query)
+{
+    char full[300], clean[256];
+    if (!resolve(query, "path", full, sizeof(full), clean, sizeof(clean)) ||
+        strcmp(clean, "/") == 0)
+    {
+        reply_text(fd, 400, "Ongeldig pad");
+        return;
+    }
+    bool protect = strcasecmp(clean, "/_nds") == 0 || strcasecmp(clean, "/_dsidl") == 0;
+
+    if (strcmp(target, "/api/mkdir") == 0)
+    {
+        if (mkdir(full, 0777) != 0)
+            reply_text(fd, 409, "Map maken mislukt (bestaat hij al?)");
+        else
+            reply_text(fd, 200, "OK");
+    }
+    else if (strcmp(target, "/api/delete") == 0)
+    {
+        if (protect)
+        {
+            reply_text(fd, 403, "Deze map is nodig voor je DSi-software en wordt niet verwijderd");
+            return;
+        }
+        struct stat stt;
+        if (stat(full, &stt) != 0)
+            reply_text(fd, 404, "Niet gevonden");
+        else if (S_ISDIR(stt.st_mode) ? rmdir(full) != 0 : remove(full) != 0)
+            reply_text(fd, 409, S_ISDIR(stt.st_mode) ? "Map is niet leeg" : "Verwijderen mislukt");
+        else
+        {
+            snprintf(st->last_msg, sizeof(st->last_msg), "Verwijderd: %.68s", clean);
+            reply_text(fd, 200, "OK");
+        }
+    }
+    else if (strcmp(target, "/api/rename") == 0)
+    {
+        char to[128];
+        if (protect || !query_param(query, "to", to, sizeof(to)))
+        {
+            reply_text(fd, 400, "Ongeldige naam");
+            return;
+        }
+        sanitize_filename(to);
+        if (to[0] == '\0')
+        {
+            reply_text(fd, 400, "Ongeldige naam");
+            return;
+        }
+        char dst[420];
+        snprintf(dst, sizeof(dst), "%s", full);
+        char *slash = strrchr(dst, '/');
+        snprintf(slash + 1, sizeof(dst) - (slash + 1 - dst), "%s", to);
+        if (file_exists(dst))
+            reply_text(fd, 409, "Er bestaat al iets met die naam");
+        else if (rename(full, dst) != 0)
+            reply_text(fd, 500, "Hernoemen mislukt");
+        else
+            reply_text(fd, 200, "OK");
+    }
+    else if (strcmp(target, "/api/hide") == 0)
+    {
+        char on[4] = "1";
+        query_param(query, "on", on, sizeof(on));
+        int attr = FAT_getAttr(full);
+        if (attr < 0)
+        {
+            reply_text(fd, 404, "Niet gevonden");
+            return;
+        }
+        attr = on[0] == '1' ? (attr | ATTR_HIDDEN) : (attr & ~ATTR_HIDDEN);
+        if (FAT_setAttr(full, attr & 0xFF) < 0)
+            reply_text(fd, 500, "Kenmerk wijzigen mislukt");
+        else
+            reply_text(fd, 200, "OK");
+    }
+    else
+    {
+        reply_text(fd, 404, "Onbekende actie");
+    }
+}
+
 static void handle_client(int fd, server_state_t *st, const char *default_dir)
 {
     (void)default_dir;
@@ -362,7 +616,19 @@ static void handle_client(int fd, server_state_t *st, const char *default_dir)
 
     if (strcmp(method, "GET") == 0 && (strcmp(target, "/") == 0 || strcmp(target, "/index.html") == 0))
     {
-        reply(fd, 200, "text/html; charset=utf-8", page_html, sizeof(page_html) - 1);
+        reply(fd, 200, "text/html; charset=utf-8", (const char *)webui_bin, webui_bin_size);
+    }
+    else if (strcmp(method, "GET") == 0 && strcmp(target, "/api/list") == 0)
+    {
+        api_list(fd, st, query ? query : "");
+    }
+    else if (strcmp(method, "GET") == 0 && strcmp(target, "/dl") == 0)
+    {
+        api_download(fd, st, query ? query : "");
+    }
+    else if (strcmp(method, "POST") == 0 && strncmp(target, "/api/", 5) == 0)
+    {
+        api_action(fd, st, target, query ? query : "");
     }
     else if ((strcmp(method, "PUT") == 0 || strcmp(method, "POST") == 0) &&
              strcmp(target, "/upload") == 0)

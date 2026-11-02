@@ -8,6 +8,7 @@
 typedef struct {
     volatile bool stop;         // set by UI
     volatile bool receiving;
+    volatile bool sending;      // phone is downloading a file
     volatile unsigned long done;
     volatile unsigned long total;
     volatile int files_ok;

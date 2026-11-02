@@ -4,7 +4,8 @@ Homebrew-downloader voor de (gemodde) Nintendo DSi. Alles werkt op de DSi zelf v
 
 - **Lijst + zoeken**: haalt de homebrew-catalogus van [Universal-DB](https://db.universal-team.net) op (dezelfde bron als Universal-Updater), toont alle DS/DSi-titels met een `.nds`- of `.dsi`-bestand en laat je zoeken en filteren.
 - **Downloaden**: de gekozen titel komt direct op je SD-kaart in `sd:/roms/nds/`.
-- **Ontvangen van telefoon**: de DSi wordt een mini-webserver. Open het getoonde adres (bv. `http://192.168.1.23`) in de browser van je telefoon en stuur bestanden naar de SD-kaart, zonder kaartlezer.
+- **Bestanden beheren vanaf je telefoon**: de DSi wordt een mini-webserver. Open het getoonde adres (bv. `http://192.168.1.23`) in de browser van je telefoon: blader door de hele SD-kaart, upload naar elke map, download naar je telefoon, maak mappen, hernoem, verwijder, en verberg of toon bestanden/mappen (bv. een map die je in TWiLight Menu++ verborgen hebt).
+- **Wifi-beheer**: zoek netwerken, kies er een en typ het wachtwoord met het schermtoetsenbord. Netwerken worden bewaard in `sd:/_dsidl/wifi.txt` (niet in het interne geheugen van de DSi) en DSiDL verbindt daarna automatisch met het sterkste bekende netwerk. De netwerken uit de DSi-instellingen werken ook gewoon.
 - **Zichzelf updaten**: via het menu haalt DSiDL de nieuwste versie van GitHub en vervangt zijn eigen `.nds`-bestand.
 
 ## Installeren
@@ -26,14 +27,16 @@ De eerste keer haalt hij de lijst op (±2 MB, duurt even). Daarna gebruikt hij d
 | Y | zoeken (toetsenbord op het onderste scherm) |
 | B | zoekopdracht wissen / annuleren |
 | SELECT | soort wisselen: alles, game, emulator, utility, app |
-| X | menu: ontvangen van telefoon, lijst vernieuwen, DSiDL updaten |
+| X | menu: telefoon (bestanden beheren), wifi-netwerken, lijst vernieuwen, DSiDL updaten |
 | START | afsluiten |
 
-Houd **B** ingedrukt tijdens het opstarten om zonder wifi te starten.
+Houd **B** ingedrukt tijdens het opstarten om niet automatisch te verbinden.
 
-## Ontvangen van je telefoon
+In het wifi-scherm: **A** verbinden, **Y** wachtwoord (opnieuw) invoeren, **X** opgeslagen netwerk vergeten, **R** opnieuw zoeken, **START** (bij het typen) wachtwoord tonen/verbergen. `*` = opgeslagen in DSiDL, `D` = staat in de DSi-instellingen.
 
-Menu (X) → *Ontvangen van telefoon*. Op het onderste scherm staat een adres. Telefoon op hetzelfde wifi-netwerk → adres in de browser openen → map kiezen (`/roms/nds`, `/roms/gba`, ... of zelf typen) → bestanden kiezen → *Versturen*. Er is een voortgangsbalk; een bestaand bestand met dezelfde naam wordt vervangen. De DSi-wifi is traag (reken op enkele honderden KB/s), dus een groot bestand kan een paar minuten duren.
+## Bestanden beheren vanaf je telefoon
+
+Menu (X) → *Telefoon: bestanden beheren*. Op het onderste scherm staat een adres. Telefoon op hetzelfde wifi-netwerk → adres in de browser openen. Tik op een map om erin te gaan, op ⋮ voor acties (downloaden, hernoemen, verbergen/zichtbaar maken, verwijderen), op 👁 om verborgen items te zien en op *Uploaden* om bestanden naar de huidige map te sturen. Mappen kunnen alleen verwijderd worden als ze leeg zijn; `_nds` en `_dsidl` zijn beschermd. Er is een voortgangsbalk; een bestaand bestand met dezelfde naam wordt vervangen. De DSi-wifi is traag (reken op enkele honderden KB/s), dus een groot bestand kan een paar minuten duren.
 
 ## Instellingen
 

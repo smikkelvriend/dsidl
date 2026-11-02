@@ -19,6 +19,7 @@
 #include "http.h"
 #include "server.h"
 #include "util.h"
+#include "wifi.h"
 
 #define CATALOG_URL   "https://db.universal-team.net/data/full.json"
 #define UPDATE_BASE   "https://github.com/smikkelvriend/dsidl/releases/latest/download/"
@@ -29,7 +30,7 @@ static char DATA_DIR[32], CATALOG_FILE[64], SETTINGS_FILE[64];
 #define LIST_ROWS 19
 #define COLS 32
 
-static PrintConsole top, bottom;
+PrintConsole top, bottom;
 static Keyboard *kbd;
 
 static catalog_t cat;
@@ -45,7 +46,8 @@ static const char *categories[] = { "alles", "game", "emulator", "utility", "app
 static char self_path[256] = "";
 static char save_dir[128];
 static char update_base[200] = UPDATE_BASE;
-static bool wifi_ok = false;
+#define wifi_ok wifi_connected()
+static char WIFI_FILE[64];
 
 // ---------------------------------------------------------------------------
 // Background jobs (run in a cothread with a big stack, UI keeps running)
@@ -467,7 +469,10 @@ static void draw_list(void)
     color(31, 1);
     printf("DSiDL " APP_VERSION);
     reset_color();
-    printf("  %s\n", wifi_ok ? "wifi aan" : "GEEN WIFI");
+    if (wifi_ok)
+        printf("  %.13s\n", wifi_ssid()[0] ? wifi_ssid() : "wifi aan");
+    else
+        printf("  GEEN WIFI\n");
 
     printf("Zoek: ");
     color(33, 1);
@@ -575,13 +580,13 @@ static void draw_server(void)
     color(33, 1);
     printf("Ontvangen via wifi\n\n");
     reset_color();
-    printf("Open op je telefoon (zelfde\nwifi-netwerk) in de browser:\n\n");
+    printf("Open op je telefoon (zelfde\nwifi-netwerk) in de browser om\nbestanden te bekijken en sturen:\n\n");
     color(32, 1);
     printf("  http://%s\n\n", srv.ip);
     reset_color();
-    if (srv.receiving)
+    if (srv.receiving || srv.sending)
     {
-        printf("Bezig: %.24s\n", srv.current);
+        printf("%s: %.20s\n", srv.sending ? "Naar telefoon" : "Ontvangen", srv.current);
         draw_progress_bar(srv.done, srv.total);
     }
     else
@@ -662,7 +667,8 @@ static bool ensure_wifi(void)
 {
     if (wifi_ok)
         return true;
-    message("Geen wifi", "Er is geen wifi-verbinding. Stel wifi in via de DSi-instellingen (verbinding 1-6) en start DSiDL opnieuw.");
+    if (confirm("Geen wifi", "Er is geen wifi-verbinding.\n\nWifi-netwerken openen om een netwerk te kiezen?"))
+        return wifi_manager();
     return false;
 }
 
@@ -776,22 +782,33 @@ static void self_update(void)
     message("Update mislukt", job_err);
 }
 
-static void do_search(void)
+// Text input with the on-screen keyboard. Returns false if cancelled.
+bool ui_text_input(const char *title, const char *hint, char *buf, size_t size)
 {
     keyboardShow();
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%s", search);
     int len = strlen(buf);
+    bool masked = false;
+    bool ok = false;
+    bool dirty = true;
 
     while (1)
     {
-        consoleSelect(&bottom);
-        consoleClear();
-        color(33, 1);
-        printf("Zoeken\n");
-        reset_color();
-        printf("> %s_\n\n", buf);
-        printf("ENTER/A: zoek  B: annuleer");
+        if (dirty)
+        {
+            consoleSelect(&bottom);
+            consoleClear();
+            color(33, 1);
+            printf("%.32s\n", title);
+            reset_color();
+            printf("> ");
+            for (int i = 0; i < len; i++)
+                printf("%c", masked ? '*' : buf[i]);
+            printf("_\n\n");
+            if (hint)
+                printf("%.64s\n", hint);
+            printf("ENTER/A: ok   B: annuleer");
+            dirty = false;
+        }
 
         cothread_yield_irq(IRQ_VBLANK);
         scanKeys();
@@ -800,36 +817,53 @@ static void do_search(void)
 
         if (c == '\n' || (k & KEY_A))
         {
-            snprintf(search, sizeof(search), "%s", buf);
+            ok = true;
             break;
         }
         if (k & KEY_B)
             break;
+        if (k & KEY_START)
+        {
+            masked = !masked;
+            dirty = true;
+        }
         if (c == '\b')
         {
             if (len > 0)
                 buf[--len] = '\0';
+            dirty = true;
         }
-        else if (c >= 32 && c < 127 && len < (int)sizeof(buf) - 1)
+        else if (c >= 32 && c < 127 && len < (int)size - 1)
         {
             buf[len++] = c;
             buf[len] = '\0';
+            dirty = true;
         }
     }
     keyboardHide();
+    return ok;
+}
+
+static void do_search(void)
+{
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%s", search);
+    if (ui_text_input("Zoeken", NULL, buf, sizeof(buf)))
+        snprintf(search, sizeof(search), "%s", buf);
     rebuild_view();
 }
 
 static void menu(void)
 {
     static const char *items[] = {
-        "Ontvangen van telefoon",
+        "Telefoon: bestanden beheren",
+        "Wifi-netwerken",
         "Lijst vernieuwen",
         "DSiDL updaten",
         "Over DSiDL",
         "Terug",
     };
-    const int n = 5;
+    const int n = 6;
     int cur = 0;
 
     while (1)
@@ -873,9 +907,10 @@ static void menu(void)
             switch (cur)
             {
                 case 0: run_server(); break;
-                case 1: refresh_catalog(); return;
-                case 2: self_update(); break;
-                case 3:
+                case 1: wifi_manager(); break;
+                case 2: refresh_catalog(); return;
+                case 3: self_update(); break;
+                case 4:
                     snprintf(job_msg, sizeof(job_msg),
                              "DSiDL %s\n\nHomebrew uit Universal-DB.\n\nInstellingen:\n%s\n\nProgramma:\n%s",
                              APP_VERSION, SETTINGS_FILE, self_path);
@@ -960,24 +995,21 @@ int main(int argc, char **argv)
     if (!tls)
         printf("Let op: HTTPS niet beschikbaar\n");
 
-    printf("Verbinden met wifi...\n");
-    printf("(%s)\n", isDSiMode() ? "DSi-modus, WPA2 ok" : "DS-modus, alleen WEP/open");
+    printf("Wifi starten (%s)\n", isDSiMode() ? "DSi-modus, WPA2 ok" : "DS-modus, alleen WEP/open");
     cothread_yield_irq(IRQ_VBLANK);
     scanKeys();
+    snprintf(WIFI_FILE, sizeof(WIFI_FILE), "%s/wifi.txt", DATA_DIR);
 #ifdef SKIP_WIFI
-    if (1)
+    bool autoconnect = false;
 #else
-    if (keysHeld() & KEY_B)
+    bool autoconnect = !(keysHeld() & KEY_B);
 #endif
-    {
-        printf("B ingedrukt: offline gestart.\n");
-        wifi_ok = false;
-    }
-    else
-    {
-        wifi_ok = Wifi_InitDefault(WFC_CONNECT | WIFI_ATTEMPT_DSI_MODE);
-    }
-    printf(wifi_ok ? "Verbonden!\n" : "Geen verbinding.\n");
+    if (!autoconnect)
+        printf("B ingedrukt: niet automatisch verbinden.\n");
+    if (wifi_start(WIFI_FILE, autoconnect))
+        printf("Verbonden met %s\n", wifi_ssid()[0] ? wifi_ssid() : "wifi");
+    else if (autoconnect)
+        printf("Geen verbinding. Kies een netwerk\nvia X > Wifi-netwerken.\n");
 
     printf("Lijst laden...\n");
     cothread_yield_irq(IRQ_VBLANK);
