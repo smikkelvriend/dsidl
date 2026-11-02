@@ -2316,39 +2316,80 @@ static void drive_download(const gd_entry_t *e)
     app_message("Klaar!", msg);
 }
 
+// Set, change or remove the Drive link. Returns true if a link is set afterwards.
+static bool drive_link_menu(bool have)
+{
+    char cur[400] = "";
+    read_drive_link(cur, sizeof(cur));
+    char text[600];
+    if (have)
+    {
+        char id[72] = "", rk[64];
+        if (!gd_parse_link(cur, id, sizeof(id), rk, sizeof(rk)))
+            snprintf(id, sizeof(id), "(ongeldig)");
+        snprintf(text, sizeof(text),
+                 "Gekoppelde map: %.60s\n\nPlak een nieuwe link op je telefoon (Telefoon > Drive) of typ de map-ID hier.", id);
+    }
+    else
+        snprintf(text, sizeof(text), "%s",
+                 "Nog geen Drive-map gekoppeld. Zet je eigen gedumpte spellen in een Google Drive-map, deel die met 'Iedereen met de link' en plak de link op je telefoon (Telefoon > Drive).");
+    const char *labels4[] = { "Terug", "Wissen", "Typen", "Telefoon" };
+    const char *keys4[] = { "B", "X", "Y", "A" };
+    const char *const *labels = have ? labels4 : (const char *const[]){ "Terug", "Link typen", "Via telefoon" };
+    const char *const *keys = have ? keys4 : (const char *const[]){ "B", "Y", "A" };
+    int nb = have ? 4 : 3;
+    int ch = app_dialog(have ? "Drive-link wijzigen" : "Mijn Drive", text, labels, keys, nb, nb - 1);
+    if (have && ch == 1)
+    {
+        if (app_confirm("Ontkoppelen", "De Drive-link verwijderen? Je bestanden in Drive blijven gewoon staan.", "Ontkoppelen", "Nee"))
+            write_drive_link("");
+    }
+    else if (ch == nb - 1)
+    {
+        run_server();
+        gfx_transition(TR_RIGHT);
+    }
+    else if (ch == nb - 2)
+    {
+        char buf[200] = "";
+        if (app_text_input("Map-ID of link van Google Drive", "het deel na /folders/", buf, sizeof(buf), false) && buf[0])
+            write_drive_link(buf);
+    }
+    char now[400];
+    return read_drive_link(now, sizeof(now));
+}
+
+static bool drive_screen_once(void);
+
 static void drive_screen(void)
+{
+    while (drive_screen_once())
+        ;
+}
+
+// Returns true when the link was changed and the screen should reopen
+static bool drive_screen_once(void)
 {
     char link[400];
     if (!read_drive_link(link, sizeof(link)))
     {
-        static const char *labels[] = { "Terug", "Link typen", "Via telefoon" };
-        static const char *keys[] = { "B", "Y", "A" };
-        int ch = app_dialog("Mijn Drive",
-            "Nog geen Drive-map gekoppeld. Zet je eigen gedumpte spellen in een Google Drive-map, deel die met 'Iedereen met de link' en plak de link op je telefoon (Telefoon > Drive).",
-            labels, keys, 3, 2);
-        if (ch == 2)
-        {
-            run_server();
-            gfx_transition(TR_RIGHT);
-        }
-        else if (ch == 1)
-        {
-            char buf[200] = "";
-            if (app_text_input("Map-ID of link van Google Drive", "het deel na /folders/", buf, sizeof(buf), false))
-                write_drive_link(buf);
-        }
-        if (!read_drive_link(link, sizeof(link)))
-            return;
+        if (!drive_link_menu(false) || !read_drive_link(link, sizeof(link)))
+            return false;
     }
     if (!ensure_wifi())
-        return;
+        return false;
 
     char root_id[72], rkey[64];
     if (!gd_parse_link(link, root_id, sizeof(root_id), rkey, sizeof(rkey)))
     {
-        app_message("Ongeldige link", "De opgeslagen Drive-link wordt niet herkend. Plak hem opnieuw via Telefoon > Drive.");
-        return;
+        app_message("Ongeldige link", "De opgeslagen Drive-link wordt niet herkend. Kies een nieuwe link.");
+        char before[400];
+        snprintf(before, sizeof(before), "%s", link);
+        if (drive_link_menu(true) && read_drive_link(link, sizeof(link)) && strcmp(link, before) != 0)
+            return true;
+        return false;
     }
+    bool relink = false;
 
     // Folder stack
     char ids[16][72], names[16][80];
@@ -2392,7 +2433,9 @@ static void drive_screen(void)
                 const char *dot = strrchr(ents[i].name, '.');
                 const char *cat = (dot && (!strcasecmp(dot, ".nds") || !strcasecmp(dot, ".dsi"))) ? "game" :
                                   (dot && !strcasecmp(dot, ".zip")) ? "app" : "other";
-                rw[m++] = (ui_row_t){ ents[i].name, ents[i].folder ? "Map" : (dot && !strcasecmp(dot, ".zip") ? "Zip - wordt uitgepakt" : "Bestand"),
+                rw[m++] = (ui_row_t){ ents[i].name, ents[i].folder ? "Map" :
+                                      (dot && !strcasecmp(dot, ".zip")) ? "Zip - wordt uitgepakt" :
+                                      (dot && !strcasecmp(dot, ".rar")) ? "Rar - wordt uitgepakt" : "Bestand",
                                       cat, NULL, NULL, ents[i].folder ? 1 : 0 };
             }
             char sub[120];
@@ -2400,13 +2443,31 @@ static void drive_screen(void)
                 snprintf(sub, sizeof(sub), "Zoeken: %s (%d)", filter, m - (depth > 0 ? 1 : 0));
             else
                 snprintf(sub, sizeof(sub), "%s - %d items", names[depth], n);
-            static const char *labels[] = { "Openen", "Zoeken", "Terug" };
-            static const char *keys[] = { "A", "Y", "B" };
+            static const char *labels[] = { "Openen", "Zoeken", "Link", "Terug" };
+            static const char *keys[] = { "A", "Y", "X", "B" };
             if (sel >= m)
                 sel = 0;
-            int res = run_list("Mijn Drive", sub, rw, m, &sel, 3, labels, keys, 3,
+            int res = run_list("Mijn Drive", sub, rw, m, &sel, 3, labels, keys, 4,
                                filter[0] ? "Niets gevonden" : "Lege map", drive_top);
             free(rw);
+
+            if (res == -12)
+            {
+                free(map);
+                char before[400], after[400];
+                snprintf(before, sizeof(before), "%s", link);
+                bool have = drive_link_menu(true);
+                if (!have || !read_drive_link(after, sizeof(after)) || strcmp(after, before) != 0)
+                {
+                    relink = have; // reopen with the new link (or leave if removed)
+                    back = true;
+                    depth = 0;
+                    break;
+                }
+                continue;
+            }
+            if (res == -13)
+                res = -12;
 
             if (res == -11)
             {
@@ -2469,6 +2530,7 @@ static void drive_screen(void)
         }
     }
     gfx_transition(TR_RIGHT);
+    return relink;
 }
 
 // ---------------------------------------------------------------------------
