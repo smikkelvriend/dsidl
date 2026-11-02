@@ -84,6 +84,11 @@
 #define	makedev(maj,min) ((0xff00 & ((maj)<<8)) | (0xffff00ff & (min)))
 #endif
 
+/* DSiDL: some picolibc builds have major()/minor() but no makedev() */
+#if !defined(makedev) && !defined(HAVE_MAKEDEV)
+#define	makedev(maj,min) ((0xff00 & ((maj)<<8)) | (0xffff00ff & (min)))
+#endif
+
 /* Play games to come up with a suitable makedev() definition. */
 #ifdef __QNXNTO__
 /* QNX.  <sigh> */
