@@ -70,7 +70,7 @@ static volatile int job_result;
 static job_t job_type;
 static http_progress_t prog;
 static server_state_t srv;
-static char job_err[96];
+static char job_err[300];
 static char job_msg[512];
 static char job_url[2048];
 static char job_path[300];
@@ -1694,7 +1694,7 @@ static bool extract_archive(const char *arc, const char *dest_dir, const char *n
     snprintf(job_path, sizeof(job_path), "%s", src);
     snprintf(job_url, sizeof(job_url), "%s", dest);
     int r = run_job_ui(rar ? JOB_UNRAR : JOB_UNZIP, "Uitpakken", name);
-    char msg[400];
+    char msg[700];
     if (r != 200)
     {
         sound_play(SND_ERROR);

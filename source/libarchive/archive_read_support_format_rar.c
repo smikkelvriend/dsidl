@@ -2378,7 +2378,7 @@ parse_codes(struct archive_read *a)
         rar->dictionary_size))
       {
         archive_set_error(&a->archive, ENOMEM,
-                          "Out of memory");
+                          "PPMd needs %u MB", rar->dictionary_size >> 20);
         return (ARCHIVE_FATAL);
       }
       if (!__archive_ppmd7_functions.PpmdRAR_RangeDec_Init(&rar->range_dec))

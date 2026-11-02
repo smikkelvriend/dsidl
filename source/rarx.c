@@ -65,6 +65,38 @@ static int rar_far_read(int64_t pos, uint8_t *dst, int len)
     return r == (size_t)len ? 0 : -1;
 }
 
+// Largest block malloc() can still give (in MB), for error messages
+static unsigned free_mb(void)
+{
+    size_t lo = 0, hi = 32u << 20;
+    while (hi - lo > (256u << 10))
+    {
+        size_t mid = (lo + hi) / 2;
+        void *t = malloc(mid);
+        if (t)
+        {
+            free(t);
+            lo = mid;
+        }
+        else
+            hi = mid;
+    }
+    return (unsigned)(lo >> 20);
+}
+
+static void set_rar_err(struct archive *a, char *err, size_t errlen)
+{
+    const char *m = archive_error_string(a);
+    unsigned need;
+    if (m && sscanf(m, "PPMd needs %u MB", &need) == 1)
+        snprintf(err, errlen,
+                 "Oude rar (PPMd): heeft %u MB geheugen nodig, de DSi heeft %u MB vrij. "
+                 "Pak opnieuw in als RAR5 of .zip.",
+                 need, free_mb());
+    else
+        snprintf(err, errlen, "Rar-fout: %.60s", m ? m : "onbekend");
+}
+
 static bool safe_rel(const char *n)
 {
     return n[0] != '/' && !strstr(n, "..") && !strchr(n, ':');
@@ -137,7 +169,7 @@ bool rar_extract_all(const char *rar, const char *dest, http_progress_t *prog,
             break;
         if (r != ARCHIVE_OK && r != ARCHIVE_WARN)
         {
-            snprintf(err, errlen, "Rar-fout: %.60s", archive_error_string(a));
+            set_rar_err(a, err, errlen);
             ok = false;
             break;
         }
@@ -219,7 +251,7 @@ bool rar_extract_all(const char *rar, const char *dest, http_progress_t *prog,
         if (r != ARCHIVE_EOF)
         {
             if (!err[0])
-                snprintf(err, errlen, "Rar-fout: %.60s", archive_error_string(a));
+                set_rar_err(a, err, errlen);
             remove(tmp);
             ok = false;
             break;
