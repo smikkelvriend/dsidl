@@ -3,7 +3,7 @@
 BLOCKSDS	?= /opt/blocksds/core
 BLOCKSDSEXT	?= /opt/blocksds/external
 
-APP_VERSION	?= 2.5.1
+APP_VERSION	?= 2.6.0
 
 NAME		:= dsidl
 GAME_TITLE	:= DSiDL
@@ -25,6 +25,6 @@ LIBDIRS		:= $(BLOCKSDS)/libs/dswifi \
 		   $(CURDIR)/mbedtls-nds
 
 # Embed the phone web page (web/index.html) as data/webui.bin
-$(shell mkdir -p data && cp -u web/index.html data/webui.bin)
+$(shell mkdir -p data && cp -u web/index.html data/webui.bin && cp -u web/unrar/unrar.js data/unrarjs.bin && cp -u web/unrar/unrar.wasm data/unrarwasm.bin)
 
 include $(BLOCKSDS)/sys/default_makefiles/rom_arm9/Makefile

@@ -1298,11 +1298,14 @@ static void download_selected(void)
     gfx_transition(TR_RIGHT);
 }
 
-static void run_server(void)
+// task_path: optional full SD path (sd:/...) of a .rar the phone should unpack
+static bool run_server_task(const char *task_path)
 {
     if (!ensure_wifi())
-        return;
+        return false;
     memset(&srv, 0, sizeof(srv));
+    if (task_path && strncmp(task_path, drive, strlen(drive)) == 0)
+        snprintf(srv.task_unrar, sizeof(srv.task_unrar), "%s", task_path + strlen(drive));
     u32 ip = Wifi_GetIP();
     snprintf(srv.ip, sizeof(srv.ip), "%lu.%lu.%lu.%lu", ip & 0xFF, (ip >> 8) & 0xFF,
              (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
@@ -1335,6 +1338,38 @@ static void run_server(void)
     }
     if (job_result != 200)
         app_message("Server-fout", job_err);
+    if (task_path)
+    {
+        nds_free(&installed);
+        nds_scan(&installed, drive, 1000);
+    }
+    return srv.task_done;
+}
+
+static void run_server(void)
+{
+    run_server_task(NULL);
+}
+
+// Lets the phone unpack a .rar (much faster than the DSi, especially for old
+// PPMd archives). Returns true when the phone reported success.
+static bool phone_unrar(const char *full, const char *name)
+{
+    char msg[400];
+    snprintf(msg, sizeof(msg),
+             "Scan zo de QR-code met je telefoon (zelfde wifi). De telefoon haalt %s op, "
+             "pakt hem uit en stuurt de bestanden terug. Daarna wordt het rar-bestand verwijderd. "
+             "Laat de pagina open tot hij klaar is.", name);
+    app_message("Uitpakken met telefoon", msg);
+    bool ok = run_server_task(full);
+    gfx_transition(TR_RIGHT);
+    if (ok)
+    {
+        sound_play(SND_SUCCESS);
+        snprintf(msg, sizeof(msg), "%s is uitgepakt door je telefoon.", name);
+        app_message("Klaar", msg);
+    }
+    return ok;
 }
 
 static void self_update(void)
@@ -1946,8 +1981,23 @@ static void files_screen(void)
         }
         else
         {
-            bool arc = ends_with(e->name, ".zip") || ends_with(e->name, ".rar");
-            if (arc)
+            if (ends_with(e->name, ".rar"))
+            {
+                static const char *ropts[] = { "Uitpakken met telefoon (snel)", "Uitpakken op de DSi", "Verplaatsen naar...", "Kopiëren naar...", "Naam wijzigen", "Verbergen / zichtbaar", "Verwijderen", "Terug" };
+                res = choose(e->name, "Rar-archief", ropts, 8);
+                if (res == 0 || res == 1)
+                {
+                    if (res == 0)
+                        phone_unrar(full, e->name);
+                    else
+                        extract_archive(full, fm_dir, e->name, false);
+                    free_files(fs, n);
+                    continue;
+                }
+                if (res > 1)
+                    res -= 2;
+            }
+            else if (ends_with(e->name, ".zip"))
             {
                 static const char *aopts[] = { "Uitpakken hier", "Verplaatsen naar...", "Kopiëren naar...", "Naam wijzigen", "Verbergen / zichtbaar", "Verwijderen", "Terug" };
                 res = choose(e->name, "Archief", aopts, 7);
@@ -2225,7 +2275,31 @@ static void drive_download(const gd_entry_t *e)
         return;
     }
 
-    if (ends_with(name, ".zip") || ends_with(name, ".rar"))
+    if (ends_with(name, ".rar"))
+    {
+        char arc[300];
+        snprintf(arc, sizeof(arc), "%s", job_path);
+        static const char *labels[] = { "Op de DSi", "Met telefoon" };
+        static const char *keys[] = { "Y", "A" };
+        int ch = app_dialog("Rar uitpakken",
+                            "Je telefoon pakt rar-bestanden veel sneller uit (seconden in plaats van "
+                            "minuten). Op de DSi zelf kan ook, maar oude rar-bestanden duren daar lang.",
+                            labels, keys, 2, 1);
+        if (ch == 1)
+            phone_unrar(arc, name);
+        else if (ch == 0)
+            extract_archive(arc, save_dir, name, true);
+        else
+        {
+            char m[400];
+            snprintf(m, sizeof(m), "%s staat in %s%s. Je kunt hem later uitpakken via Bestanden.",
+                     name, save_dir, is_drive_root(save_dir) ? "/" : "");
+            app_message("Opgeslagen", m);
+        }
+        build_rows();
+        return;
+    }
+    if (ends_with(name, ".zip"))
     {
         char arc[300];
         snprintf(arc, sizeof(arc), "%s", job_path);

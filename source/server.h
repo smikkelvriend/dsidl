@@ -15,6 +15,8 @@ typedef struct {
     char current[96];
     char last_msg[96];
     char ip[24];
+    char task_unrar[256];       // SD path (e.g. /roms/x.rar) the phone should unpack
+    volatile bool task_done;
 } server_state_t;
 
 // Blocking: runs until state->stop is set. Returns false if the port could

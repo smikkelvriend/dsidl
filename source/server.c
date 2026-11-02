@@ -21,6 +21,8 @@ extern char drive[8];
 
 // Web page (web/index.html, embedded at build time)
 #include "webui_bin.h"
+#include "unrarjs_bin.h"
+#include "unrarwasm_bin.h"
 
 static bool send_all(int fd, const void *data, size_t len)
 {
@@ -1131,6 +1133,45 @@ static void handle_client(int fd, server_state_t *st, const char *default_dir)
     if (strcmp(method, "GET") == 0 && (strcmp(target, "/") == 0 || strcmp(target, "/index.html") == 0))
     {
         reply(fd, 200, "text/html; charset=utf-8", (const char *)webui_bin, webui_bin_size);
+    }
+    else if (strcmp(method, "GET") == 0 && strcmp(target, "/unrar.js") == 0)
+    {
+        reply(fd, 200, "text/javascript", (const char *)unrarjs_bin, unrarjs_bin_size);
+    }
+    else if (strcmp(method, "GET") == 0 && strcmp(target, "/unrar.wasm") == 0)
+    {
+        reply(fd, 200, "application/wasm", (const char *)unrarwasm_bin, unrarwasm_bin_size);
+    }
+    else if (strcmp(method, "GET") == 0 && strcmp(target, "/api/task") == 0)
+    {
+        char js[600], escd[520];
+        size_t k = 0;
+        for (const char *c = st->task_unrar; *c && k < sizeof(escd) - 2; c++)
+        {
+            if (*c == '"' || *c == '\\')
+                escd[k++] = '\\';
+            escd[k++] = *c;
+        }
+        escd[k] = '\0';
+        if (st->task_unrar[0])
+            snprintf(js, sizeof(js), "{\"unrar\":\"%s\"}", escd);
+        else
+            snprintf(js, sizeof(js), "{}");
+        reply(fd, 200, "application/json", js, strlen(js));
+    }
+    else if (strcmp(method, "POST") == 0 && strcmp(target, "/api/taskdone") == 0)
+    {
+        char ok[8] = "0";
+        query_param(query ? query : "", "ok", ok, sizeof(ok));
+        if (st->task_unrar[0])
+        {
+            const char *nm = strrchr(st->task_unrar, '/');
+            snprintf(st->last_msg, sizeof(st->last_msg), "%s %.60s",
+                     ok[0] == '1' ? "Uitgepakt via telefoon:" : "Uitpakken mislukt:", nm ? nm + 1 : st->task_unrar);
+            st->task_unrar[0] = '\0';
+            st->task_done = ok[0] == '1';
+        }
+        reply_text(fd, 200, "OK");
     }
     else if (strcmp(method, "GET") == 0 && strcmp(target, "/api/list") == 0)
     {

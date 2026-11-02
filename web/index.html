@@ -161,6 +161,7 @@ function sheet(e){
   const b=[];
   if(e.d){b.push(['Openen',()=>load(p)]);b.push(['Downloaden als zip',()=>{location.href='/zip?path='+encodeURIComponent(p)}]);}
   else b.push(['Downloaden naar telefoon',()=>{location.href='/dl?path='+encodeURIComponent(p)}]);
+  if(!e.d&&/\.rar$/i.test(e.n))b.unshift(['Uitpakken (telefoon doet het werk)',()=>phoneUnrar(p,false)]);
   b.push(['Naam wijzigen',async()=>{const n=prompt('Nieuwe naam',e.n);if(!n||n==e.n)return;
     try{await api('/api/rename?path='+encodeURIComponent(p)+'&to='+encodeURIComponent(n),{method:'POST'});toast('Hernoemd');load(cwd)}catch(x){toast(x.message)}}]);
   b.push(['Verplaatsen naar...',()=>startClip('move',p,e)]);
@@ -227,8 +228,54 @@ $('v-close').onclick=()=>{$('viewer').style.display='none';$('v-img').src=''};
 $('gdrive').onclick=async()=>{let cur='';try{cur=await api('/api/drive')}catch(e){}
   const l=prompt('Plak de link van je Google Drive-map met je eigen gedumpte spellen.\n\nZet de map in Drive op "Iedereen met de link" (bekijken). Daarna vind je hem op de DSi onder Menu > Drive.',cur);
   if(l===null)return;try{await api('/api/drive?link='+encodeURIComponent(l.trim()),{method:'POST'});toast(l.trim()?'Drive gekoppeld':'Drive ontkoppeld')}catch(x){toast(x.message)}};
+/* ---- Rar uitpakken op de telefoon ----
+   De telefoon haalt het rar-bestand van de DSi, pakt het uit met de officiele
+   unRAR-code (WebAssembly, door de DSi zelf geserveerd) en stuurt de bestanden terug. */
+let unrarMod=null;
+function bar(name,p,info,eta){$('up').style.display='block';$('paste').style.display='none';$('up-name').textContent=name;
+  $('up-bar').style.width=(p*100)+'%';$('up-pct').textContent=Math.floor(p*100)+'%';$('up-info').textContent=info||'';$('up-eta').textContent=eta||''}
+async function fetchBytes(url,label){
+  const r=await fetch(url);if(!r.ok)throw new Error(await r.text()||('HTTP '+r.status));
+  const tot=+r.headers.get('Content-Length')||0,rd=r.body.getReader(),parts=[],t0=Date.now();let got=0;
+  for(;;){const{done,value}=await rd.read();if(done)break;parts.push(value);got+=value.length;
+    const sec=(Date.now()-t0)/1000,sp=got/Math.max(sec,.1);
+    bar(label,tot?got/tot:0,size(got)+(tot?' / '+size(tot):'')+' · '+size(sp)+'/s',tot&&sec>1?'nog '+fmtTime((tot-got)/sp):'')}
+  const out=new Uint8Array(got);let o=0;for(const p of parts){out.set(p,o);o+=p.length}return out}
+const madeDirs=new Set();
+async function mkdirs(base,rel){let d=base;for(const part of rel){d=join(d,part);if(madeDirs.has(d))continue;
+  try{await api('/api/mkdir?path='+encodeURIComponent(d),{method:'POST'})}catch(x){}madeDirs.add(d)}return d}
+async function phoneUnrar(path,auto){
+  const name=path.split('/').pop(),dir=path.substring(0,path.lastIndexOf('/'))||'/';
+  let ok=false;
+  try{
+    const data=await fetchBytes('/dl?path='+encodeURIComponent(path),'1/3 · '+name+' ophalen');
+    bar('2/3 · Uitpakken op je telefoon...',0,'','');
+    if(!unrarMod)unrarMod=await import('/unrar.js');
+    const wasmBinary=await (await fetch('/unrar.wasm')).arrayBuffer();
+    const ex=await unrarMod.createExtractorFromData({wasmBinary,data:data.buffer});
+    const heads=[...ex.getFileList().fileHeaders];
+    if(heads.some(h=>h.flags.encrypted))throw new Error('Rar met wachtwoord: niet ondersteund');
+    const files=heads.filter(h=>!h.flags.directory);
+    let i=0,n=0;
+    for(const f of ex.extract().files){
+      if(f.fileHeader.flags.directory||!f.extraction)continue;i++;
+      const rel=f.fileHeader.name.replace(/\\/g,'/').split('/').filter(x=>x&&x!='..'),base=rel.pop();
+      const target=rel.length?await mkdirs(dir,rel):dir;
+      await upload(new File([f.extraction],base),i,files.length,target);n++}
+    if(!n)throw new Error('Geen bestanden in de rar');
+    ok=true;
+    if(auto||confirm(n+' bestand(en) uitgepakt. Het rar-bestand verwijderen?')){
+      try{await api('/api/delete?path='+encodeURIComponent(path),{method:'POST'})}catch(x){}}
+    toast(n+' bestand(en) uitgepakt in '+(dir=='/'?'SD':dir));
+  }catch(x){toast('Uitpakken mislukt: '+(x.message||x))}
+  $('up').style.display='none';
+  if(auto){try{await api('/api/taskdone?ok='+(ok?1:0),{method:'POST'})}catch(x){}}
+  load(dir)}
+async function checkTask(){try{const t=JSON.parse(await api('/api/task'));
+  if(t.unrar){toast('De DSi vraagt: '+t.unrar.split('/').pop()+' uitpakken');phoneUnrar(t.unrar,true)}}catch(e){}}
 space();
 load(cwd);
+checkTask();
 </script>
 </body>
 </html>
