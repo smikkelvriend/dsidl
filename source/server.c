@@ -482,6 +482,188 @@ static void api_download(int fd, server_state_t *st, const char *query)
         snprintf(st->last_msg, sizeof(st->last_msg), "Verstuurd: %.70s", safe);
 }
 
+// Copies one file, updating progress. Returns true on success.
+static bool copy_file(const char *src, const char *dst, server_state_t *st)
+{
+    FILE *in = fopen(src, "rb");
+    if (!in)
+        return false;
+    FILE *out = fopen(dst, "wb");
+    if (!out)
+    {
+        fclose(in);
+        return false;
+    }
+    setvbuf(out, NULL, _IOFBF, 32 * 1024);
+
+    struct stat stt;
+    st->total = stat(src, &stt) == 0 ? (unsigned long)stt.st_size : 0;
+    st->done = 0;
+    const char *nm = strrchr(src, '/');
+    snprintf(st->current, sizeof(st->current), "%s", nm ? nm + 1 : src);
+
+    bool ok = true;
+    char *buf = malloc(32 * 1024);
+    if (!buf)
+        ok = false;
+    while (ok && !st->stop)
+    {
+        size_t r = fread(buf, 1, 32 * 1024, in);
+        if (r == 0)
+            break;
+        if (fwrite(buf, 1, r, out) != r)
+            ok = false;
+        st->done += r;
+        cothread_yield();
+    }
+    if (st->stop)
+        ok = false;
+    free(buf);
+    fclose(in);
+    if (fclose(out) != 0)
+        ok = false;
+    if (!ok)
+        remove(dst);
+    return ok;
+}
+
+// Recursively copies a file or folder
+static bool copy_any(const char *src, const char *dst, server_state_t *st, int depth)
+{
+    struct stat stt;
+    if (stat(src, &stt) != 0 || depth > 16)
+        return false;
+    if (!S_ISDIR(stt.st_mode))
+        return copy_file(src, dst, st);
+
+    if (mkdir(dst, 0777) != 0 && !file_exists(dst))
+        return false;
+    DIR *d = opendir(src);
+    if (!d)
+        return false;
+    bool ok = true;
+    struct dirent *de;
+    while (ok && (de = readdir(d)) != NULL)
+    {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+            continue;
+        char *s2 = malloc(600), *d2 = malloc(600);
+        if (!s2 || !d2)
+            ok = false;
+        else
+        {
+            snprintf(s2, 600, "%s/%s", src, de->d_name);
+            snprintf(d2, 600, "%s/%s", dst, de->d_name);
+            ok = copy_any(s2, d2, st, depth + 1);
+        }
+        free(s2);
+        free(d2);
+    }
+    closedir(d);
+    return ok;
+}
+
+// Picks "name.ext", "name (2).ext", ... that doesn't exist yet in dir
+static void unique_path(const char *dir, const char *name, char *out, size_t outlen)
+{
+    snprintf(out, outlen, "%s/%s", dir, name);
+    if (!file_exists(out))
+        return;
+    char base[160], ext[32] = "";
+    snprintf(base, sizeof(base), "%s", name);
+    char *dot = strrchr(base, '.');
+    if (dot && dot != base)
+    {
+        snprintf(ext, sizeof(ext), "%s", dot);
+        *dot = '\0';
+    }
+    for (int i = 2; i < 1000; i++)
+    {
+        snprintf(out, outlen, "%s/%s (%d)%s", dir, base, i, ext);
+        if (!file_exists(out))
+            return;
+    }
+}
+
+static void api_copy_move(int fd, server_state_t *st, bool move, const char *query)
+{
+    char full[300], clean[256], dfull[300], dclean[256];
+    if (!resolve(query, "path", full, sizeof(full), clean, sizeof(clean)) ||
+        !resolve(query, "to", dfull, sizeof(dfull), dclean, sizeof(dclean)) ||
+        strcmp(clean, "/") == 0)
+    {
+        reply_text(fd, 400, "Ongeldig pad");
+        return;
+    }
+    if (strcmp(dclean, "/") == 0)
+        snprintf(dfull, sizeof(dfull), "%s", drive);
+
+    bool protect = strcasecmp(clean, "/_nds") == 0 || strcasecmp(clean, "/_dsidl") == 0;
+    if (move && protect)
+    {
+        reply_text(fd, 403, "Deze map is nodig voor je DSi-software en wordt niet verplaatst");
+        return;
+    }
+
+    // Not into itself or one of its own sub folders
+    size_t cl = strlen(clean);
+    if (strncmp(dclean, clean, cl) == 0 && (dclean[cl] == '\0' || dclean[cl] == '/'))
+    {
+        reply_text(fd, 400, "Kan een map niet in zichzelf plaatsen");
+        return;
+    }
+
+    struct stat stt;
+    if (stat(full, &stt) != 0)
+    {
+        reply_text(fd, 404, "Niet gevonden");
+        return;
+    }
+
+    const char *name = strrchr(clean, '/');
+    name = name ? name + 1 : clean;
+
+    // Source folder of the item
+    char srcdir[256];
+    snprintf(srcdir, sizeof(srcdir), "%s", clean);
+    char *sl = strrchr(srcdir, '/');
+    if (sl == srcdir)
+        strcpy(srcdir, "/");
+    else if (sl)
+        *sl = '\0';
+    if (move && strcmp(srcdir, dclean) == 0)
+    {
+        reply_text(fd, 400, "Het staat al in deze map");
+        return;
+    }
+
+    char dst[420];
+    unique_path(dfull, name, dst, sizeof(dst));
+
+    if (move)
+    {
+        if (rename(full, dst) != 0)
+        {
+            reply_text(fd, 500, "Verplaatsen mislukt");
+            return;
+        }
+        snprintf(st->last_msg, sizeof(st->last_msg), "Verplaatst: %.68s", name);
+        reply_text(fd, 200, "OK");
+        return;
+    }
+
+    st->receiving = true;
+    bool ok = copy_any(full, dst, st, 0);
+    st->receiving = false;
+    if (!ok)
+    {
+        reply_text(fd, 500, st->stop ? "Gestopt" : "Kopiëren mislukt (SD vol?)");
+        return;
+    }
+    snprintf(st->last_msg, sizeof(st->last_msg), "Gekopieerd: %.66s", name);
+    reply_text(fd, 200, "OK");
+}
+
 static void api_action(int fd, server_state_t *st, const char *target, const char *query)
 {
     char full[300], clean[256];
@@ -542,6 +724,10 @@ static void api_action(int fd, server_state_t *st, const char *target, const cha
             reply_text(fd, 500, "Hernoemen mislukt");
         else
             reply_text(fd, 200, "OK");
+    }
+    else if (strcmp(target, "/api/move") == 0 || strcmp(target, "/api/copy") == 0)
+    {
+        api_copy_move(fd, st, target[5] == 'm', query);
     }
     else if (strcmp(target, "/api/hide") == 0)
     {

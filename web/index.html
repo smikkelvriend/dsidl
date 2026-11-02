@@ -54,6 +54,12 @@ main{padding:0 10px 120px}
 .up .row span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .prog{height:6px;background:#333;border-radius:3px;overflow:hidden;margin-top:8px}
 .prog div{height:100%;width:0;background:var(--acc);transition:width .15s}
+.paste{position:fixed;left:10px;right:10px;bottom:calc(12px + env(safe-area-inset-bottom));background:#1f1f1f;border:1px solid var(--acc);border-radius:14px;padding:12px;display:none;z-index:11;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+.paste .what{font-size:13px;color:var(--dim);margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.paste .what b{color:var(--text)}
+.paste .row{display:flex;gap:8px}
+.busy{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;place-items:center;z-index:40}
+.busy div{background:#1f1f1f;padding:18px 22px;border-radius:14px;font-size:15px}
 .toast{position:fixed;left:50%;top:16px;transform:translateX(-50%) translateY(-80px);background:#2a2a2a;padding:10px 16px;border-radius:12px;z-index:30;transition:transform .2s;font-size:14px;max-width:90%}
 .toast.show{transform:translateX(-50%)}
 input[type=file]{display:none}
@@ -81,6 +87,11 @@ input[type=file]{display:none}
   <div class="prog"><div id="up-bar"></div></div>
   <div class="row" style="margin-top:6px;color:var(--dim)"><span id="up-info"></span><span id="up-eta"></span></div>
 </div>
+<div class="paste" id="paste">
+  <div class="what" id="paste-what"></div>
+  <div class="row"><button class="btn grow" id="paste-cancel">Annuleren</button><button class="btn primary grow" id="paste-go">Hier plaatsen</button></div>
+</div>
+<div class="busy" id="busy"><div id="busy-t">Bezig...</div></div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -88,6 +99,7 @@ const $=id=>document.getElementById(id);
 let cwd=localStorage.getItem('dsidl_cwd')||'/roms/nds';
 let showHidden=localStorage.getItem('dsidl_hidden')==='1';
 let entries=[];
+let clip=null; // {op:'move'|'copy', path, name, dir}
 
 function toast(t){const e=$('toast');e.textContent=t;e.classList.add('show');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('show'),2500)}
 function size(b){if(b<1024)return b+' B';if(b<1048576)return (b/1024).toFixed(0)+' KB';if(b<1073741824)return (b/1048576).toFixed(1)+' MB';return (b/1073741824).toFixed(2)+' GB'}
@@ -133,6 +145,8 @@ function sheet(e){
   if(e.d)b.push(['Openen',()=>load(p)]);else b.push(['Downloaden naar telefoon',()=>{location.href='/dl?path='+encodeURIComponent(p)}]);
   b.push(['Naam wijzigen',async()=>{const n=prompt('Nieuwe naam',e.n);if(!n||n==e.n)return;
     try{await api('/api/rename?path='+encodeURIComponent(p)+'&to='+encodeURIComponent(n),{method:'POST'});toast('Hernoemd');load(cwd)}catch(x){toast(x.message)}}]);
+  b.push(['Verplaatsen naar...',()=>startClip('move',p,e)]);
+  b.push(['Kopiëren naar...',()=>startClip('copy',p,e)]);
   b.push([e.h?'Zichtbaar maken':'Verbergen (in TWiLight e.d.)',async()=>{
     try{await api('/api/hide?path='+encodeURIComponent(p)+'&on='+(e.h?0:1),{method:'POST'});toast(e.h?'Weer zichtbaar':'Verborgen');load(cwd)}catch(x){toast(x.message)}}]);
   b.push(['Verwijderen',async()=>{if(!confirm((e.d?'Map':'Bestand')+' "'+e.n+'" verwijderen?'+(e.d?'\n(Alleen lege mappen)':'')))return;
@@ -149,11 +163,11 @@ $('mkdir').onclick=async()=>{const n=prompt('Naam van de nieuwe map');if(!n)retu
 $('upbtn').onclick=()=>$('files').click();
 $('files').onchange=async()=>{const fs=[...$('files').files];$('files').value='';if(!fs.length)return;
   let ok=0;for(let i=0;i<fs.length;i++){try{await upload(fs[i],i+1,fs.length);ok++}catch(x){toast(fs[i].name+': '+x)}}
-  $('up').style.display='none';toast(ok+' van '+fs.length+' bestand(en) verstuurd');load(cwd)};
+  $('up').style.display='none';if(clip)$('paste').style.display='block';toast(ok+' van '+fs.length+' bestand(en) verstuurd');load(cwd)};
 
 function fmtTime(s){s=Math.max(0,Math.round(s));const m=Math.floor(s/60),h=Math.floor(m/60);return h?h+':'+String(m%60).padStart(2,'0')+':'+String(s%60).padStart(2,'0'):m+':'+String(s%60).padStart(2,'0')}
 function upload(f,n,tot){return new Promise((res,rej)=>{
-  $('up').style.display='block';$('up-name').textContent=(tot>1?n+'/'+tot+' · ':'')+f.name;$('up-bar').style.width='0';$('up-pct').textContent='0%';$('up-info').textContent='';$('up-eta').textContent='';
+  $('up').style.display='block';$('paste').style.display='none';$('up-name').textContent=(tot>1?n+'/'+tot+' · ':'')+f.name;$('up-bar').style.width='0';$('up-pct').textContent='0%';$('up-info').textContent='';$('up-eta').textContent='';
   const x=new XMLHttpRequest(),t0=Date.now();
   x.open('PUT','/upload?dir='+encodeURIComponent(cwd)+'&name='+encodeURIComponent(f.name));
   x.upload.onprogress=e=>{if(!e.lengthComputable)return;const p=e.loaded/e.total,sec=(Date.now()-t0)/1000,sp=e.loaded/Math.max(sec,.1);
@@ -162,6 +176,18 @@ function upload(f,n,tot){return new Promise((res,rej)=>{
     if(sec>1)$('up-eta').textContent='nog '+fmtTime((e.total-e.loaded)/sp)};
   x.onload=()=>x.status==200?res():rej(x.responseText||'HTTP '+x.status);
   x.onerror=()=>rej('Verbinding verbroken');x.send(f)})}
+
+function startClip(op,p,e){clip={op,path:p,name:e.n,dir:e.d};
+  $('paste-what').innerHTML=(op=='move'?'Verplaatsen':'Kopiëren')+': <b>'+esc(e.n)+'</b> · ga naar de doelmap';
+  $('paste-go').textContent=op=='move'?'Hierheen verplaatsen':'Hierheen kopiëren';
+  $('paste').style.display='block';toast('Blader naar de doelmap')}
+$('paste-cancel').onclick=()=>{clip=null;$('paste').style.display='none'};
+$('paste-go').onclick=async()=>{if(!clip)return;const c=clip;
+  $('busy-t').textContent=(c.op=='move'?'Verplaatsen':'Kopiëren')+'...';$('busy').style.display='grid';
+  try{await api('/api/'+c.op+'?path='+encodeURIComponent(c.path)+'&to='+encodeURIComponent(cwd),{method:'POST'});
+    toast(c.op=='move'?'Verplaatst':'Gekopieerd');clip=null;$('paste').style.display='none'}
+  catch(x){toast(x.message)}
+  $('busy').style.display='none';load(cwd)};
 
 load(cwd);
 </script>

@@ -36,7 +36,7 @@ In het wifi-scherm: **A** verbinden, **Y** wachtwoord (opnieuw) invoeren, **X** 
 
 ## Bestanden beheren vanaf je telefoon
 
-Menu (X) → *Telefoon: bestanden beheren*. Op het onderste scherm staat een adres. Telefoon op hetzelfde wifi-netwerk → adres in de browser openen. Tik op een map om erin te gaan, op ⋮ voor acties (downloaden, hernoemen, verbergen/zichtbaar maken, verwijderen), op 👁 om verborgen items te zien en op *Uploaden* om bestanden naar de huidige map te sturen. Mappen kunnen alleen verwijderd worden als ze leeg zijn; `_nds` en `_dsidl` zijn beschermd. Er is een voortgangsbalk; een bestaand bestand met dezelfde naam wordt vervangen. De DSi-wifi is traag (reken op enkele honderden KB/s), dus een groot bestand kan een paar minuten duren.
+Menu (X) → *Telefoon: bestanden beheren*. Op het onderste scherm staat een adres. Telefoon op hetzelfde wifi-netwerk → adres in de browser openen. Tik op een map om erin te gaan, op ⋮ voor acties (downloaden, hernoemen, verplaatsen, kopiëren, verbergen/zichtbaar maken, verwijderen), op 👁 om verborgen items te zien en op *Uploaden* om bestanden naar de huidige map te sturen. Bij *Verplaatsen naar...* of *Kopiëren naar...* blader je naar de doelmap en tik je op *Hierheen*; mappen worden met inhoud gekopieerd en bij dubbele namen komt er `(2)` achter. Mappen kunnen alleen verwijderd worden als ze leeg zijn; `_nds` en `_dsidl` zijn beschermd. Er is een voortgangsbalk; een bestaand bestand met dezelfde naam wordt vervangen. De DSi-wifi is traag (reken op enkele honderden KB/s), dus een groot bestand kan een paar minuten duren.
 
 ## Instellingen
 
