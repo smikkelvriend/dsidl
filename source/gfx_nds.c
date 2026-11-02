@@ -111,7 +111,7 @@ static void run_transition(void)
 {
     int kind = pending_tr;
     pending_tr = TR_NONE;
-    const int frames = kind == TR_FADE ? 8 : 12;
+    const int frames = kind == TR_FADE ? 6 : 8;
     bool both = kind == TR_LEFT || kind == TR_RIGHT || kind == TR_FADE;
     for (int f = 1; f < frames; f++)
     {

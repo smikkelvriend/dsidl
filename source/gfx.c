@@ -1,8 +1,15 @@
 // DSiDL - software renderer (platform independent part)
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "gfx.h"
+
+#if defined(__arm__) && defined(__thumb__)
+// The renderer is the hot path: compile it as 32-bit ARM code (faster)
+#pragma GCC target("arm")
+#endif
 
 surface_t scr_top, scr_bot;
 
@@ -22,37 +29,54 @@ void gfx_noclip(surface_t *s)
     s->cy1 = SCR_H;
 }
 
+// Blends two 15-bit colors. Red+blue and green are handled in two parallel
+// integer operations instead of three separate channels.
+static inline color_t mix5(color_t a, color_t b, uint32_t al /* 0..32 */)
+{
+    uint32_t ia = 32 - al;
+    uint32_t rb = (((a & 0x7C1F) * ia + (b & 0x7C1F) * al) >> 5) & 0x7C1F;
+    uint32_t g = (((a & 0x03E0) * ia + (b & 0x03E0) * al) >> 5) & 0x03E0;
+    return (color_t)(rb | g | 0x8000);
+}
+
 color_t gfx_mix(color_t a, color_t b, int alpha)
 {
     if (alpha <= 0)
-        return a;
+        return a | 0x8000;
     if (alpha >= 256)
         return b;
-    int ar = a & 31, ag = (a >> 5) & 31, ab = (a >> 10) & 31;
-    int br = b & 31, bg = (b >> 5) & 31, bb = (b >> 10) & 31;
-    int r = ar + (((br - ar) * alpha) >> 8);
-    int g = ag + (((bg - ag) * alpha) >> 8);
-    int bl = ab + (((bb - ab) * alpha) >> 8);
-    return (color_t)(r | (g << 5) | (bl << 10) | 0x8000);
+    return mix5(a, b, (uint32_t)(alpha + 4) >> 3);
 }
 
 static inline void plot_a(surface_t *s, int x, int y, color_t c, int alpha)
 {
-    if (x < s->cx0 || y < s->cy0 || x >= s->cx1 || y >= s->cy1 || alpha <= 0)
+    if (x < s->cx0 || y < s->cy0 || x >= s->cx1 || y >= s->cy1 || alpha <= 4)
         return;
     color_t *p = &s->px[y * SCR_W + x];
-    *p = alpha >= 256 ? c : gfx_mix(*p, c, alpha);
+    *p = alpha >= 252 ? c : mix5(*p, c, (uint32_t)(alpha + 4) >> 3);
 }
 
 void gfx_fill(surface_t *s, int x, int y, int w, int h, color_t c)
 {
     int x0 = x < s->cx0 ? s->cx0 : x, y0 = y < s->cy0 ? s->cy0 : y;
     int x1 = x + w > s->cx1 ? s->cx1 : x + w, y1 = y + h > s->cy1 ? s->cy1 : y + h;
+    if (x1 <= x0 || y1 <= y0)
+        return;
+    uint32_t c2 = c | ((uint32_t)c << 16);
     for (int yy = y0; yy < y1; yy++)
     {
         color_t *p = &s->px[yy * SCR_W + x0];
-        for (int xx = x0; xx < x1; xx++)
+        int n = x1 - x0;
+        if (((uintptr_t)p & 2) && n)
+        {
             *p++ = c;
+            n--;
+        }
+        uint32_t *q = (uint32_t *)p;
+        for (int i = 0; i < n / 2; i++)
+            q[i] = c2;
+        if (n & 1)
+            p[n - 1] = c;
     }
 }
 
@@ -60,11 +84,24 @@ void gfx_blend(surface_t *s, int x, int y, int w, int h, color_t c, int alpha)
 {
     int x0 = x < s->cx0 ? s->cx0 : x, y0 = y < s->cy0 ? s->cy0 : y;
     int x1 = x + w > s->cx1 ? s->cx1 : x + w, y1 = y + h > s->cy1 ? s->cy1 : y + h;
+    if (alpha <= 4)
+        return;
+    if (alpha >= 252)
+    {
+        gfx_fill(s, x, y, w, h, c);
+        return;
+    }
+    uint32_t al = (uint32_t)(alpha + 4) >> 3, ia = 32 - al;
+    uint32_t crb = (c & 0x7C1F) * al, cg = (c & 0x03E0) * al;
     for (int yy = y0; yy < y1; yy++)
     {
         color_t *p = &s->px[yy * SCR_W + x0];
         for (int xx = x0; xx < x1; xx++, p++)
-            *p = gfx_mix(*p, c, alpha);
+        {
+            color_t a = *p;
+            *p = (color_t)(((((a & 0x7C1F) * ia + crb) >> 5) & 0x7C1F) |
+                           ((((a & 0x03E0) * ia + cg) >> 5) & 0x03E0) | 0x8000);
+        }
     }
 }
 
@@ -88,6 +125,30 @@ static int corner_cov(int px, int py, int r)
     return (out - d2) * 256 / (out - in);
 }
 
+// Precomputed corner coverage per radius: cov[r][cy * r + cx] (0..255)
+#define MAX_R 40
+static uint8_t *cov_lut[MAX_R + 1];
+
+static const uint8_t *corner_lut(int r)
+{
+    if (r > MAX_R)
+        r = MAX_R;
+    if (!cov_lut[r])
+    {
+        uint8_t *t = malloc(r * r ? r * r : 1);
+        if (!t)
+            return NULL;
+        for (int cy = 1; cy <= r; cy++)
+            for (int cx = 1; cx <= r; cx++)
+            {
+                int c = corner_cov(cx * 16 - 8, cy * 16 - 8, r);
+                t[(cy - 1) * r + (cx - 1)] = c > 255 ? 255 : c;
+            }
+        cov_lut[r] = t;
+    }
+    return cov_lut[r];
+}
+
 static void rrect_impl(surface_t *s, int x, int y, int w, int h, int r, color_t c, int alpha)
 {
     if (w <= 0 || h <= 0)
@@ -96,37 +157,34 @@ static void rrect_impl(surface_t *s, int x, int y, int w, int h, int r, color_t 
         r = w / 2;
     if (r * 2 > h)
         r = h / 2;
+    if (r > MAX_R)
+        r = MAX_R;
+    const uint8_t *lut = r > 0 ? corner_lut(r) : NULL;
     for (int yy = 0; yy < h; yy++)
     {
         int cy = -1;
         if (yy < r)
-            cy = r - yy;           // distance rows above the inner area
+            cy = r - yy;
         else if (yy >= h - r)
             cy = yy - (h - r) + 1;
-        if (cy < 0)
+        if (cy < 0 || !lut)
         {
-            if (alpha >= 256)
-                gfx_fill(s, x, y + yy, w, 1, c);
-            else
-                gfx_blend(s, x, y + yy, w, 1, c, alpha);
+            gfx_blend(s, x, y + yy, w, 1, c, alpha);
             continue;
         }
-        for (int xx = 0; xx < w; xx++)
+        const uint8_t *row = lut + (cy - 1) * r;
+        // Corners
+        for (int cx = r; cx >= 1; cx--)
         {
-            int cx;
-            if (xx < r)
-                cx = r - xx;
-            else if (xx >= w - r)
-                cx = xx - (w - r) + 1;
-            else
-                cx = 0;
-            int a;
-            if (cx == 0)
-                a = 256;
-            else
-                a = corner_cov(cx * 16 - 8, cy * 16 - 8, r);
-            plot_a(s, x + xx, y + yy, c, a * alpha >> 8);
+            int a = row[cx - 1];
+            if (a == 0)
+                continue;
+            a = a == 255 ? alpha : a * alpha >> 8;
+            plot_a(s, x + (r - cx), y + yy, c, a);
+            plot_a(s, x + w - 1 - (r - cx), y + yy, c, a);
         }
+        // Middle part of the row
+        gfx_blend(s, x + r, y + yy, w - 2 * r, 1, c, alpha);
     }
 }
 
@@ -183,9 +241,10 @@ void gfx_rrect_line(surface_t *s, int x, int y, int w, int h, int r, int t, colo
 void gfx_shadow(surface_t *s, int x, int y, int w, int h, int r)
 {
     // Soft drop shadow: a few expanding translucent layers
-    gfx_rrect_blend(s, x - 1, y + 1, w + 2, h + 2, r + 1, RGB(0, 20, 60), 18);
-    gfx_rrect_blend(s, x, y + 2, w, h + 1, r, RGB(0, 20, 60), 22);
-    gfx_rrect_blend(s, x + 1, y + 3, w - 2, h, r, RGB(0, 20, 60), 16);
+    // Only the edges that stay visible around the card are drawn
+    gfx_rrect_blend(s, x - 1, y + h - r, w + 2, r + 3, r + 1, RGB(0, 20, 60), 30);
+    gfx_blend(s, x - 1, y + r, 1, h - 2 * r, RGB(0, 20, 60), 18);
+    gfx_blend(s, x + w, y + r, 1, h - 2 * r, RGB(0, 20, 60), 18);
 }
 
 void gfx_circle(surface_t *s, int cx, int cy, int r, color_t c)
@@ -280,14 +339,33 @@ int gfx_text_w(const char *str, int font)
 static void draw_glyph(surface_t *s, int x, int y, const font_t *f, const font_glyph_t *g, color_t c)
 {
     const unsigned char *d = f->data + g->offset;
+    int gx = x + g->x, gy = y + g->y;
+    // Fully clipped?
+    if (gx >= s->cx1 || gy >= s->cy1 || gx + g->w <= s->cx0 || gy + g->h <= s->cy0)
+        return;
+    bool inside = gx >= s->cx0 && gy >= s->cy0 && gx + g->w <= s->cx1 && gy + g->h <= s->cy1;
+    uint32_t crb = c & 0x7C1F, cg = c & 0x03E0;
     int i = 0;
     for (int yy = 0; yy < g->h; yy++)
     {
+        color_t *row = &s->px[(gy + yy) * SCR_W + gx];
         for (int xx = 0; xx < g->w; xx++, i++)
         {
-            int a = (i & 1) ? (d[i >> 1] >> 4) : (d[i >> 1] & 15);
-            if (a)
-                plot_a(s, x + g->x + xx, y + g->y + yy, c, a == 15 ? 256 : a * 17);
+            uint32_t a = (i & 1) ? (d[i >> 1] >> 4) : (d[i >> 1] & 15);
+            if (!a)
+                continue;
+            if (!inside && (gx + xx < s->cx0 || gx + xx >= s->cx1 || gy + yy < s->cy0 || gy + yy >= s->cy1))
+                continue;
+            color_t *p = &row[xx];
+            if (a == 15)
+                *p = c;
+            else
+            {
+                uint32_t al = (a * 32 + 7) / 15, ia = 32 - al;
+                color_t b = *p;
+                *p = (color_t)(((((b & 0x7C1F) * ia + crb * al) >> 5) & 0x7C1F) |
+                               ((((b & 0x03E0) * ia + cg * al) >> 5) & 0x03E0) | 0x8000);
+            }
         }
     }
 }

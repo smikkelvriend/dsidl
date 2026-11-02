@@ -26,8 +26,8 @@ int app_ease(int cur, int target)
         return cur;
     if (d > -2 && d < 2)
         return target;
-    // Move about a third of the remaining distance each frame
-    int step = d / 3;
+    // Move half of the remaining distance each frame
+    int step = d / 2;
     if (step == 0)
         step = d > 0 ? 1 : -1;
     return cur + step;
@@ -98,7 +98,7 @@ int app_dialog(const char *title, const char *text, const char *const *labels,
         memcpy(backup, scr_bot.px, SCR_W * SCR_H * 2);
 
     // Pop in
-    for (int a = 32; a <= 256; a += 32)
+    for (int a = 64; a <= 256; a += 64)
     {
         if (backup)
             memcpy(scr_bot.px, backup, SCR_W * SCR_H * 2);
@@ -144,10 +144,10 @@ done:
             memcpy(scr_bot.px, backup, SCR_W * SCR_H * 2);
             ui_dialog(title, text, labels, keys, n, primary, 256, result);
             gfx_present_bot();
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < 2; i++)
                 app_wait_frame();
         }
-        for (int a = 192; a >= 0; a -= 64)
+        for (int a = 160; a >= 0; a -= 96)
         {
             memcpy(scr_bot.px, backup, SCR_W * SCR_H * 2);
             ui_dialog(title, text, labels, keys, n, primary, a, -1);

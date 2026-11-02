@@ -528,9 +528,15 @@ static void draw_browser(void)
 // Runs a job while showing progress. Returns job result.
 static int run_job_ui(job_t type, const char *title, const char *name)
 {
+    // First let the progress screen slide in completely, then start the
+    // (CPU heavy) work, so the animation never has to compete with it.
+    memset((void *)&prog, 0, sizeof(prog));
+    snprintf(prog.status, sizeof(prog.status), "Starten...");
+    gfx_transition(TR_UP_BOT);
+    ui_progress_screen(title, name, prog.status, 0, 0, 0, -1, "Annuleren");
+    gfx_present();
     start_job(type);
     rate_reset();
-    gfx_transition(TR_UP_BOT);
     int frame = 0;
     unsigned long shown = 0;
     while (job_running)
@@ -541,10 +547,10 @@ static int run_job_ui(job_t type, const char *title, const char *name)
             shown = target;
         unsigned long d = target - shown;
         shown += d > 8 ? d / 5 : d;
-        if ((frame++ % 2) == 0)
+        // Redraw every 3rd frame: smooth enough, leaves CPU for the download
+        if ((frame++ % 3) == 0)
         {
-            if (frame % 6 == 1)
-                rate_update(prog.done);
+            rate_update(prog.done);
             ui_progress_screen(title, name, prog.status, shown, prog.total, rate.speed,
                                rate_eta(prog.done, prog.total),
                                prog.cancel ? "Bezig..." : "Annuleren");
@@ -1088,7 +1094,7 @@ static void menu(void)
             gfx_present();
             dirty = false;
             if (anim < 256)
-                anim += 24;
+                anim += 64;
             if (anim > 256)
                 anim = 256;
         }
@@ -1115,8 +1121,7 @@ static void menu(void)
         }
         if (act < 0)
             continue;
-
-        // Short "press" on the tile before opening it
+        anim = 256; // finish the pop-in at once
         ui_menu_tile_pos(cur, &rx, &ry);
         dirty = true;
         switch (act)
@@ -1188,6 +1193,8 @@ static void wifi_status(const char *text)
 int main(int argc, char **argv)
 {
     defaultExceptionHandler();
+    if (isDSiMode())
+        setCpuClock(true); // 133 MHz: twice as fast drawing and TLS
     gfx_init();
 
     splash("Opstarten...");
