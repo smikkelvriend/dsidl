@@ -78,7 +78,8 @@ static char remote_version[32];
 static char twl_zip[96];
 static int twl_files;
 static ndslist_t installed;          // programs found on the SD card
-static int box_found, box_ok, box_skip;
+static int box_found, box_ok, box_skip, box_known_missing, box_missing_new;
+static bool box_retry_missing;
 static char *drive_html;
 static int unzip_files;
 
@@ -252,12 +253,136 @@ static const char *box_regions(char c)
     }
 }
 
+// Remembered between runs (sd:/_dsidl/boxart_cache.txt):
+//   "C <hash> <size> <code>"  game code of a file, so its header is not read again
+//   "M <code>"                GameTDB has no cover for this code (skipped next time)
+typedef struct { uint32_t key; char code[5]; bool seen; } box_code_t;
+static bool box_prune;
+static box_code_t *box_codes;
+static int box_ncodes, box_capcodes;
+static char (*box_miss)[5];
+static int box_nmiss, box_capmiss;
+
+static uint32_t box_key(const ndsfile_t *f)
+{
+    uint32_t h = 2166136261u;
+    for (const char *c = f->path; *c; c++)
+        h = (h ^ (uint8_t)*c) * 16777619u;
+    return h ^ (uint32_t)f->size * 2654435761u;
+}
+
+static void box_add_code(uint32_t key, const char *code)
+{
+    if (box_ncodes == box_capcodes)
+    {
+        int nc = box_capcodes ? box_capcodes * 2 : 256;
+        box_code_t *n = realloc(box_codes, sizeof(box_code_t) * nc);
+        if (!n)
+            return;
+        box_codes = n;
+        box_capcodes = nc;
+    }
+    box_codes[box_ncodes].key = key;
+    box_codes[box_ncodes].seen = true;
+    snprintf(box_codes[box_ncodes].code, 5, "%.4s", code);
+    box_ncodes++;
+}
+
+static const char *box_find_code(uint32_t key)
+{
+    for (int i = 0; i < box_ncodes; i++)
+        if (box_codes[i].key == key)
+        {
+            box_codes[i].seen = true;
+            return box_codes[i].code;
+        }
+    return NULL;
+}
+
+static bool box_is_missing(const char *code)
+{
+    for (int i = 0; i < box_nmiss; i++)
+        if (!strcmp(box_miss[i], code))
+            return true;
+    return false;
+}
+
+static void box_add_missing(const char *code)
+{
+    if (box_is_missing(code))
+        return;
+    if (box_nmiss == box_capmiss)
+    {
+        int nc = box_capmiss ? box_capmiss * 2 : 64;
+        char (*n)[5] = realloc(box_miss, 5 * nc);
+        if (!n)
+            return;
+        box_miss = n;
+        box_capmiss = nc;
+    }
+    snprintf(box_miss[box_nmiss++], 5, "%.4s", code);
+}
+
+static void box_cache_load(void)
+{
+    box_ncodes = box_nmiss = 0;
+    char path[96], line[64];
+    snprintf(path, sizeof(path), "%s/boxart_cache.txt", DATA_DIR);
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return;
+    while (fgets(line, sizeof(line), f))
+    {
+        unsigned long key;
+        char code[8];
+        if (line[0] == 'C' && sscanf(line + 2, "%lx %7s", &key, code) == 2 && strlen(code) == 4)
+        {
+            box_add_code((uint32_t)key, code);
+            if (box_ncodes)
+                box_codes[box_ncodes - 1].seen = false;
+        }
+        else if (line[0] == 'M' && sscanf(line + 2, "%7s", code) == 1 && strlen(code) == 4)
+            box_add_missing(code);
+    }
+    fclose(f);
+}
+
+static void box_cache_save(void)
+{
+    char path[96], tmp[100];
+    snprintf(path, sizeof(path), "%s/boxart_cache.txt", DATA_DIR);
+    snprintf(tmp, sizeof(tmp), "%s.new", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f)
+        return;
+    for (int i = 0; i < box_ncodes; i++)
+        if (!box_prune || box_codes[i].seen) // forget files that are gone
+            fprintf(f, "C %08lx %s\n", (unsigned long)box_codes[i].key, box_codes[i].code);
+    for (int i = 0; i < box_nmiss; i++)
+        fprintf(f, "M %s\n", box_miss[i]);
+    if (fclose(f) == 0)
+    {
+        remove(path);
+        rename(tmp, path);
+    }
+}
+
+static int box_missing_count(void)
+{
+    box_cache_load();
+    return box_nmiss;
+}
+
 static int boxart_run(void)
 {
     char dir[96];
     snprintf(dir, sizeof(dir), "%s/_nds/TWiLightMenu/boxart", drive);
     mkdir_p(dir);
-    box_found = box_ok = box_skip = 0;
+    box_found = box_ok = box_skip = box_known_missing = box_missing_new = 0;
+    box_cache_load();
+    box_prune = false;
+    if (box_retry_missing)
+        box_nmiss = 0;
 
     snprintf(prog.status, sizeof(prog.status), "Spellen zoeken...");
     nds_free(&installed);
@@ -274,8 +399,17 @@ static int boxart_run(void)
     {
         ndsfile_t *f = &installed.items[i];
         prog.done = i;
-        nds_read_banner(f);
-        if (strlen(f->code) != 4 || strcmp(f->code, "####") == 0 || strncmp(f->code, "HB", 2) == 0)
+        uint32_t key = box_key(f);
+        const char *known = box_find_code(key);
+        if (known)
+            snprintf(f->code, sizeof(f->code), "%s", known);
+        else
+        {
+            nds_read_banner(f);
+            box_add_code(key, strlen(f->code) == 4 ? f->code : "----");
+        }
+        if (strlen(f->code) != 4 || strcmp(f->code, "####") == 0 || strcmp(f->code, "----") == 0 ||
+            strncmp(f->code, "HB", 2) == 0)
             continue;
         box_found++;
         char out[140];
@@ -285,19 +419,29 @@ static int boxart_run(void)
             box_skip++;
             continue;
         }
+        if (box_is_missing(f->code))
+        {
+            box_known_missing++;
+            continue;
+        }
+        if (known)
+            nds_read_banner(f); // title for the status line
         if (!prog.cancel)
             snprintf(prog.status, sizeof(prog.status), "%.40s", f->title);
 
         char regs[16];
         snprintf(regs, sizeof(regs), "%s", box_regions(f->code[3]));
-        bool got = false;
+        bool got = false, all404 = true;
         for (char *reg = strtok(regs, ","); reg && !got && !prog.cancel; reg = strtok(NULL, ","))
         {
             char url[160], err[96], tmp[150];
             snprintf(url, sizeof(url), "https://art.gametdb.com/ds/coverS/%s/%s.png", reg, f->code);
             snprintf(tmp, sizeof(tmp), "%s.part", out);
             http_progress_t pp = { 0 };
-            if (http_get_file(url, tmp, &pp, err, sizeof(err)) == 200)
+            int code = http_get_file(url, tmp, &pp, err, sizeof(err));
+            if (code != 404)
+                all404 = false;
+            if (code == 200)
             {
                 // TWiLight shows up to 208x143; shrink bigger covers to 128x115
                 int w, h;
@@ -326,7 +470,16 @@ static int boxart_run(void)
         }
         if (got)
             box_ok++;
+        else if (all404 && !prog.cancel)
+        {
+            box_add_missing(f->code);
+            box_missing_new++;
+        }
+        if ((i & 31) == 31)
+            box_cache_save(); // keep progress if the DSi is switched off
     }
+    box_prune = !prog.cancel;
+    box_cache_save();
     http_set_cancel_flag(NULL);
     prog.done = n;
     if (prog.cancel)
@@ -2149,16 +2302,33 @@ static void boxart_screen(void)
 {
     if (!ensure_wifi())
         return;
-    if (!app_confirm("Boxart", "DSiDL zoekt je games op de SD-kaart en haalt de hoesjes op bij GameTDB voor TWiLight Menu++. Bestaande hoesjes blijven staan.", "Starten", "Nee"))
+    int miss = box_missing_count();
+    box_retry_missing = false;
+    if (miss > 0)
+    {
+        char q[300];
+        snprintf(q, sizeof(q), "DSiDL haalt hoesjes op bij GameTDB voor TWiLight Menu++. Games die al een hoesje "
+                 "hebben worden overgeslagen, net als %d game%s waarvoor GameTDB de vorige keer niets had.",
+                 miss, miss == 1 ? "" : "s");
+        static const char *labels[] = { "Terug", "Alles opnieuw", "Starten" };
+        static const char *keys[] = { "B", "Y", "A" };
+        int ch = app_dialog("Boxart", q, labels, keys, 3, 2);
+        if (ch <= 0)
+            return;
+        box_retry_missing = ch == 1;
+    }
+    else if (!app_confirm("Boxart", "DSiDL zoekt je games op de SD-kaart en haalt de hoesjes op bij GameTDB voor TWiLight Menu++. Games die al een hoesje hebben worden overgeslagen.", "Starten", "Nee"))
         return;
     int r = run_job_ui(JOB_BOXART, "Boxart downloaden", "GameTDB");
     gfx_transition(TR_DOWN_BOT);
     draw_browser();
-    char msg[200];
+    char msg[300];
     if (r == 200)
     {
-        snprintf(msg, sizeof(msg), "%d games gevonden.\n%d nieuwe hoesjes, %d hadden er al een.%s",
-                 box_found, box_ok, box_skip, box_ok + box_skip < box_found ? "\nVan sommige games heeft GameTDB geen hoesje." : "");
+        snprintf(msg, sizeof(msg), "%d games gevonden.\n%d nieuwe hoesjes, %d hadden er al een.\n"
+                 "%d zonder hoesje bij GameTDB%s.",
+                 box_found, box_ok, box_skip, box_missing_new + box_known_missing,
+                 box_known_missing ? " (overgeslagen, eerder niet gevonden)" : "");
         sound_play(SND_SUCCESS);
         app_message("Boxart klaar", msg);
     }
