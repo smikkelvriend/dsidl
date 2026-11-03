@@ -493,7 +493,7 @@ void ui_qr(surface_t *s, int cx, int cy, int max_size, const char *text)
     for (int y = 0; y < n; y++)
         for (int x = 0; x < n; x++)
             if (qrcodegen_getModule(qr, x, y))
-                gfx_fill(s, x0 + (x + 4) * m, y0 + (y + 4) * m, m, m, C_TEXT);
+                gfx_fill(s, x0 + (x + 4) * m, y0 + (y + 4) * m, m, m, RGB(0, 0, 0)); // always black on white, also in dark mode
 }
 
 // ---------------------------------------------------------------------------
